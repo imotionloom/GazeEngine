@@ -11,6 +11,11 @@ human-likeness without owning the hardware.
 8 族拟人状态（6 维情绪参数驱动微动作）、自然待机与扫视过冲。PC + 摄像头即可调参，
 结果实时映射到 VRM 数字人。详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+![GazeEngine gaze demo](docs/demo_gaze.gif)
+
+*Offline replay of a recorded trajectory: eyes lead, the neck lags behind. No live camera, no real person in frame.*
+*Avatar: "Nova" by [VTubeMe](https://vtubeme.com/free-vrm-avatars), CC BY 4.0 — rendered here, model not redistributed.*
+
 > **Not covered by the MIT license.** The model weights (YuNet, MediaPipe FaceLandmarker,
 > ArcFace), any `.vrm` avatar and the test footage are third-party assets under their own
 > terms. None of them ship in this repository — [docs/ASSETS.md](docs/ASSETS.md) lists what
