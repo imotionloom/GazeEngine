@@ -1,0 +1,46 @@
+# 机器人眼神驱动系统 · Python 依赖
+# ---------------------------------------------------------------------------
+# 解释器：Python 3.10（实测 3.10.22）；3.11+ 可跑 P2，但 mediapipe wheel 尚未跟上
+# 平台：Windows 10/11（实测）；Linux 下同名 wheel 均可用
+#
+# 安装：python -m pip install -r requirements.txt
+#
+# 版本号取自 2026-10-30 的实测环境，主版本全部锁定，避免 numpy/opencv 漂移。
+# ---------------------------------------------------------------------------
+
+# ---------- 核心运行期（缺任意一条 test_harness.py 都起不来） ----------
+numpy==1.26.4                  # 数值基础；不要升 2.x（mediapipe 1.1.1 / opencv 4.11 按 1.x 编译）
+pyzmq==27.2.0                   # ZMQ：5557 渲染数据、5551 IF-1a、5553 控制、5555 IF-5、5560 心跳
+websockets==16.1.1              # tools/ws_bridge.py（ZMQ→WS 9000）、tools/calib_bridge.py
+protobuf==7.36.2                # proto/gaze_messages_pb2.py 由 protoc 7.35.1 生成，含运行时版本硬校验（>=7.35.1）
+opencv-contrib-python==4.11.0.86  # 采集/画框/YuNet 人脸检测；mediapipe 也依赖 contrib 版
+mediapipe==1.1.1                # FaceLandmarker（478 关键点 → 眼/鼻/嘴 4 锚点）
+onnxruntime==1.23.2             # ArcFace embedding（p1_perception/embedder.py，CPUExecutionProvider）
+
+# ---------- 声音 VAD（默认关闭，GAZE_AUDIO=1 才启用） ----------
+sounddevice==0.5.6              # p2_decision/audio_input.py 的 PCSVAD
+
+# ---------- 开发 / 测试 ----------
+pytest==9.2.0                   # tests/（83 项：无模型权重时 78 passed + 5 skipped）
+grpcio-tools==1.85.0            # 仅重新生成 proto 时需要：
+                                # python -m grpc_tools.protoc -Iproto --python_out=proto proto/gaze_messages.proto
+
+# ---------- 可选 ----------
+# insightface==2.1              # 只有 p1_perception/_env_check.py 用到；运行期 ArcFace 走 onnxruntime 直跑
+
+# ---------------------------------------------------------------------------
+# pip 之外还需要：
+#   1) 模型文件放 models/（缺 arcfaceresnet100-8.onnx 会在 PcPerception 构造时直接失败）
+#        models/face_detection_yunet_2023mar.onnx   ~0.2 MB   YuNet 人脸检测
+#        models/face_landmarker.task                ~3.6 MB   MediaPipe 关键点
+#        models/arcfaceresnet100-8.onnx             ~249 MB   ArcFace 身份特征
+#   2) Node.js（仅 tests/js_smoke.mjs 渲染端冒烟需要；node --version）
+#   3) 标定：calibration/sim/active.json（由标定向导生成；没有则走 config.py 兜底值）
+#
+# 已知冲突（务必注意）：
+#   * 不要同时安装 opencv-python 和 opencv-contrib-python。
+#     contrib 5.x 要求 numpy>=2，会与 numpy 1.26.4 打架（pip check 会报错）。
+#     本文件只保留 contrib 的 4.11.0.86，它已包含 opencv-python 的全部模块。
+#   * numpy 保持 1.26.x；升 2.x 会导致 opencv/mediapipe 的 ABI 不匹配。
+#   * protobuf 不得低于 7.35.1（gencode 会用 ValidateProtobufRuntimeVersion 拒绝启动）。
+# ---------------------------------------------------------------------------

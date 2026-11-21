@@ -1,0 +1,53 @@
+name: Bug report
+description: Something crashes, or the gaze behaviour looks wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems should go through
+        [SECURITY.md](../SECURITY.md), not this form.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - p1_perception (detection / tracking)
+        - p2_decision (FSM / presence / geometry)
+        - p3_exec (servo layer)
+        - 3d renderer / VRM
+        - tools (bridge / calibrator / action editor)
+        - tests / CI
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected vs actual, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: |
+        Commands you ran, camera or video source, and the config you changed.
+        If it is a behaviour problem ("it looks robotic"), attach a trajectory CSV —
+        `test_videos/trajectories/` shows the format and it is the fastest way to see
+        what the head actually did.
+      placeholder: |
+        1. python test_harness.py --cam 0
+        2. ...
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, OpenCV version, whether the model weights are present.
+      placeholder: Windows 11, Python 3.10.22, opencv 4.11.0.86, weights present
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant console output or a stack trace. Redact paths if you care.
+      render: text

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>VRM Avatar Mirror · 拟人注视引擎</title>
+<style>
+  body { margin:0; overflow:hidden; background:#1a1a1a; font-family:sans-serif; }
+  #hud { position:fixed; top:10px; left:10px; color:#fff; font-size:13px;
+         background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px; line-height:1.6; }
+  #presence { position:fixed; top:10px; right:10px; width:300px; padding:10px 12px;
+         background:rgba(21,25,34,.92); border:1px solid #2a3140; border-radius:10px;
+         color:#e2e8f0; font:11px/1.4 ui-monospace,Consolas,monospace; z-index:9;
+         pointer-events:none; }
+  #presence .dim { display:grid; grid-template-columns:70px 1fr 36px; gap:6px; align-items:center; margin:2px 0; }
+  #presence .track { position:relative; height:6px; background:#222a36; border-radius:3px; }
+  #presence .band { position:absolute; top:0; bottom:0; background:#2f3a4c; border-radius:3px; }
+  #presence .fill { position:absolute; top:0; bottom:0; background:#4ea1ff; border-radius:3px; }
+  #presence .ctr { position:absolute; top:-2px; bottom:-2px; width:2px; background:#7ee787; }
+  #presence .trbar { height:4px; background:#222; border-radius:2px; margin:4px 0; }
+  #presence .trbar i { display:block; height:100%; background:#f0a040; border-radius:2px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/",
+    "@pixiv/three-vrm": "./vendor/three-vrm/three-vrm.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <b>VRM Avatar Mirror</b><br>
+  <span id="status">加载中...</span> <span id="build" style="color:#8b929e"></span><br>
+<span id="calibState">标定桥: 检测中…</span><br>
+<span id="blinkDbg" style="color:#7ee787">blink -</span><br>
+<span id="stateFam">状态: -</span><br>
+<span id="dimsInfo" style="color:#8b929e">-</span><br>
+<span id="dbg">…</span><br>
+  鼠标移动 → 眼睛跟着看<br>
+  空格 → 眨眼；A 左转 / D 右转；W/S 颈俯仰
+
+<div id="presence">
+  <b id="preFam">-</b> <span id="prePrio" style="color:#8b929e"></span><br>
+  <span id="preT" style="color:#8b929e"></span><br>
+  <div id="preTr" style="display:none">→ <span id="preTrTo"></span> <span id="preTrPct"></span>
+    <div class="trbar"><i id="preTrBar"></i></div></div>
+  <div id="preDims"></div>
+  <span id="preIdle" style="color:#8b929e"></span>
+</div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin } from '@pixiv/three-vrm';
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x222222);
+const cam = new THREE.PerspectiveCamera(30, innerWidth/innerHeight, 0.1, 50);
+cam.position.set(0, 1.60, 1.2);
+cam.lookAt(0, 1.60, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+const dir = new THREE.DirectionalLight(0xffffff, 2);
+dir.position.set(1, 2, 1);
+scene.add(dir);
+const dir2 = new THREE.DirectionalLight(0xffffff, 1);
+dir2.position.set(-1, 1, -1);
+scene.add(dir2);
+
+// 地面网格
+const grid = new THREE.GridHelper(2, 10, 0x444444, 0x333333);
+scene.add(grid);
+
+const BUILD = 'v2026-10-29c';   // 构建号：排查缓存时看这个
+
+// 眨眼包络：形状参数全部来自 P2（blink_ms / blink_close / blink_hold），
+// 这里只是纯函数求值，不含策略，也不依赖任何绝对时钟。
+// P3 的插补器照抄这 6 行即可。
+function blinkWeightAt(ageMs, ms, close, hold) {
+  if (!(ms > 0) || ageMs < 0 || ageMs >= ms) return 0;
+  const p = ageMs / ms;
+  if (p < close) return p / close;
+  if (p < hold) return 1;
+  return 1 - (p - hold) / (1 - hold);
+}
+
+let blinkAge0 = null, blinkRecvAt = 0, blinkMs = 150, blinkClose = 0.35, blinkHold = 0.55;
+
+// 消费一帧数字人数据（WS 回调与测试都走这里）
+function readMsg(ev, cb) {
+  const d = ev.data;
+  if (typeof d === 'string') { cb(d); return; }
+  if (d && typeof d.text === 'function') { d.text().then(cb).catch(() => {}); return; }
+  if (d instanceof ArrayBuffer) { cb(new TextDecoder().decode(d)); }
+}
+function applyDataFrame(m) {
+  if (!m || typeof m.eye_yaw !== 'number') return;
+  remote = m;
+  lastMsgAt = performance.now();
+  if (typeof m.blink_age_ms === 'number') {
+    blinkAge0 = m.blink_age_ms;
+    blinkRecvAt = renderT;
+    blinkMs = m.blink_ms || 150;
+    blinkClose = m.blink_close ?? 0.35;
+    blinkHold = m.blink_hold ?? 0.55;
+  }
+}
+let renderT = 0;
+let preLast = 0;   // Presence 面板节流时间戳（必须在 tick 外，否则 TDZ 崩）
+
+let vrm = null;
+const lookTarget = new THREE.Vector3(0, 1.3, 0);
+const gazeTarget = new THREE.Vector3(0, 1.3, 2);   // 标定/远程注视点
+const hud = document.getElementById('hud');
+const statusEl = document.getElementById('status');
+const buildEl = document.getElementById('build');
+const blinkEl = document.getElementById('blinkDbg');
+if (buildEl) buildEl.textContent = BUILD;
+
+let remote = null;
+// 标定向导(C2)通过 9101 广播手动摆位；有覆盖时优先于正常链路
+let calibPose = null, calibUntil = 0, calibLink = 'off', lookAtBroken = false;
+// 数字人眼球表情能表现的最大角度（0=关闭，不把余量交给脖子）
+const LOOK_MAX_DEG = (() => {
+  const v = Number(new URLSearchParams(location.search).get('lookmax'));
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+// 俯仰符号：-1 = 目标点在头下方表示"向下看"（与 lookUp/lookDown 约定一致）
+// 若某些模型 lookAt 的 pitch 方向相反，按 T 翻转
+let tiltSign = (() => {
+  const v = Number(new URLSearchParams(location.search).get('tiltsign'));
+  return v === 1 || v === -1 ? v : -1;
+})();
+let lookGain = (() => {
+  const g = Number(new URLSearchParams(location.search).get('gain'));
+  return Number.isFinite(g) && g > 0 ? Math.min(5, g) : 1.0;
+})();
+let dataWs = null, dataHost = 'localhost', dataRetry = 0;
+function connectData() {
+  try {
+    dataWs = new WebSocket(`ws://${dataHost}:9000`);
+  } catch (e) { return; }
+  dataWs.onmessage = ev => {
+    readMsg(ev, t => {
+      let m; try { m = JSON.parse(t); } catch { return; }
+      // 同一端口上还有标定事件，只认真正的姿态帧
+      applyDataFrame(m);
+    });
+  };
+  dataWs.onopen = () => { dataRetry = 0; statusEl.textContent = `✅ WS 已连接 (${dataHost})`; };
+  dataWs.onerror = () => { statusEl.textContent = `⚠ WS 错误 (${dataHost}:9000)`; };
+  dataWs.onclose = () => {
+    remote = null;
+    statusEl.textContent = '⚠ WS 断开，重连中…';
+    // localhost 解析到 ::1 而服务只监听 127.0.0.1 时，换 IPv4 再试
+    dataHost = dataHost === 'localhost' ? '127.0.0.1' : 'localhost';
+    dataRetry = Math.min(dataRetry + 1, 10);
+    setTimeout(connectData, 500 * dataRetry);
+  };
+}
+connectData();
+
+// 看门狗：连接开着但 3 秒没数据 → 主动断开触发重连（防半开连接）
+let watchdogAt = 0;
+function dataWatchdog(now) {
+  if (now - watchdogAt < 3000) return;
+  watchdogAt = now;
+  if (!dataWs || dataWs.readyState !== 1) return;     // 没连上交给 onclose 处理
+  if (!lastMsgAt && now < 5000) return;              // 刚打开，给 5 秒
+  if (lastMsgAt && now - lastMsgAt < 3000) return;    // 数据新鲜
+  try { dataWs.close(); } catch (e) {}
+}
+
+// 模型不入库（第三方许可），自备 .vrm 放入 3d/，或用 ?model=xxx.vrm 指定
+const modelUrl = new URLSearchParams(location.search).get('model') || './nova_model.vrm';
+const loader = new GLTFLoader();
+loader.register(p => new VRMLoaderPlugin(p));
+loader.load(modelUrl, gltf => {
+  vrm = gltf.userData.vrm;
+  scene.add(vrm.scene);
+  vrm.scene.rotation.y = Math.PI;   // 朝向镜头
+  statusEl.textContent = '✅ VRM 加载完成';
+  try {
+    const bones = vrm.humanoid.getBoneNames();
+    console.log('humanoid bones:', bones);
+    statusEl.textContent = '✅ bones: ' + bones.join(', ');
+  } catch(e) { console.warn('bone list failed', e); }
+},
+progress => { if (progress.total) statusEl.textContent = `加载中 ${(progress.loaded/progress.total*100).toFixed(0)}%`; },
+err => {
+  statusEl.textContent = `❌ 无法加载 ${modelUrl} —— 请把 .vrm 模型放进 3d/ 目录，或改用 ?model=文件名.vrm 指定`;
+  console.error(err);
+});
+
+// 鼠标移动 → lookAt 目标点（在头前方 1m 平面上）
+addEventListener('mousemove', e => {
+  const nx = (e.clientX / innerWidth) * 2 - 1;
+  const ny = -((e.clientY / innerHeight) * 2 - 1);
+  lookTarget.set(nx * 1.0, 1.3 + ny * 0.5, 1.0);
+});
+
+// 空格 → 眨眼；A/D W/S → 只转 neck bone
+let neckYaw = 0, neckPitch = 0;
+let manualBlinkUntil = 0, manualBlinkStart = 0;
+addEventListener('keydown', e => {
+  if (!vrm) return;
+  if (e.code === 'KeyT') {
+    tiltSign = -tiltSign;
+    statusEl.textContent = `俯仰符号 = ${tiltSign > 0 ? '+' : '-'}1（按 T 切换；看↑键是否真的向上）`;
+    return;
+  }
+  if (e.code === 'BracketRight' || e.code === 'BracketLeft') {
+    lookGain = Math.max(0.5, Math.min(5, lookGain + (e.code === 'BracketRight' ? 0.25 : -0.25)));
+    statusEl.textContent = `眼神增益 = ${lookGain.toFixed(2)}×（[ ] 调整）`;
+    return;
+  }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    manualBlinkStart = performance.now();
+    manualBlinkUntil = manualBlinkStart + 150;
+  }
+  if (e.code === 'KeyA') neckYaw -= 0.1;   // 左
+  if (e.code === 'KeyD') neckYaw += 0.1;   // 右
+  if (e.code === 'KeyW') neckPitch -= 0.05;
+  if (e.code === 'KeyS') neckPitch += 0.05;
+  statusEl.textContent = `[neck] yaw=${neckYaw.toFixed(2)} pitch=${neckPitch.toFixed(2)}`;
+});
+
+const clock = new THREE.Clock();
+let curNeckYaw = 0, curNeckPitch = 0, curNeckRoll = 0, curEyeYaw = 0, curEyePitch = 0;
+let lastMsgAt = 0;
+
+// 标定桥：只接收 calib.pose（C2 手动摆位）。
+// 端口自动探测 + 断线重连——页面比桥先打开也能连上
+(function attachCalib() {
+  const ports = [9101, 9103, 9102, 9104, 9105, 9106, 9107];
+  let sock = null, idx = 0, retryTimer = null;
+
+  const scheduleRetry = () => {
+    if (retryTimer) return;
+    retryTimer = setTimeout(() => { retryTimer = null; idx = 0; scan(); }, 3000);
+  };
+
+  const scan = () => {
+    if (sock && sock.readyState <= 1) return;      // 已连或连接中
+    if (idx >= ports.length) {
+      const el = document.getElementById('calibState');
+      if (el) el.textContent = '标定桥: 未连接（端口 9101-9107 都没响应）';
+      scheduleRetry(); return;
+    }
+    let s2;
+    try { s2 = new WebSocket(`ws://${location.hostname || '127.0.0.1'}:${ports[idx++]}`); }
+    catch (e) { return scan(); }
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true; try { s2.close(); } catch (e) {}
+      scan();
+    }, 900);
+    s2.onopen = () => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      sock = s2;
+      calibLink = 'on';
+      const el = document.getElementById('calibState');
+      if (el) el.textContent = `标定桥: 已连接 :${ports[idx - 1]}`;
+    };
+    s2.onmessage = ev => {
+      readMsg(ev, t => {
+        const m = JSON.parse(t);
+        if (m.evt === 'calib.pose' && m.pose) {
+          calibPose = m.pose;
+          calibUntil = performance.now() + (m.ttl_ms || 3000);
+          const el = document.getElementById('calibState');
+          if (el) el.textContent = `标定驱动中: eye=${m.pose.eye_yaw} tilt=${m.pose.eye_tilt}`;
+          if (hud) hud.style.outline = '2px solid #4c8dff';
+        }
+      });
+    };
+    s2.onclose = () => {
+      if (sock === s2) {
+        sock = null; calibLink = 'off';
+        const el = document.getElementById('calibState');
+        if (el) el.textContent = '标定桥: 断开，重连中…';
+        scheduleRetry();
+      }
+    };
+    s2.onerror = () => {
+      if (settled && s2.readyState > 0) return;
+      settled = true; clearTimeout(timer);
+      try { s2.close(); } catch (e) {}
+      if (sock === s2) sock = null;
+      scan();
+    };
+  };
+  scan();
+})();
+// 共用：手动眨眼余弦曲线 0→1→0，150ms
+function manualBlinkWeight() {
+  if (manualBlinkUntil <= 0) return 0;
+  const e = (performance.now() - manualBlinkStart) / 150;
+  if (e >= 1) { manualBlinkUntil = 0; return 0; }
+  return Math.sin(Math.PI * Math.max(0, e));
+}
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = clock.getDelta();
+  renderT += dt * 1000;
+  dataWatchdog(renderT);
+  if (vrm) {
+    // WS 超时 500ms 视为断开
+    if (remote && performance.now() - lastMsgAt > 500) remote = null;
+    if (calibPose && performance.now() > calibUntil) calibPose = null;
+    if (calibPose) remote = calibPose;      // 标定覆盖优先
+
+    if (remote) {
+      const tNY = THREE.MathUtils.degToRad(remote.neck_yaw);   // +pan = 向右
+      const tNP = -THREE.MathUtils.degToRad(remote.neck_pitch);
+      const tNR = THREE.MathUtils.degToRad(remote.neck_roll || 0);
+      neckYaw = neckPitch = 0;
+      const tEY = remote.eye_yaw, tEP = remote.eye_tilt;
+      const kn = 1 - Math.exp(-dt / 0.200);
+      const ke = 1 - Math.exp(-dt / 0.003);
+      curNeckYaw += (tNY - curNeckYaw) * kn;
+      curNeckPitch += (tNP - curNeckPitch) * kn;
+      curNeckRoll += (tNR - curNeckRoll) * kn;
+      curEyeYaw  += (tEY - curEyeYaw) * ke;
+      curEyePitch += (tEP - curEyePitch) * ke;
+
+      // ---- 眼球角度：超出模型表现能力的部分交给脖子 ----
+      // 满量程来自标定（C6 / look_deg_per_weight），默认 30°
+      const lookScale = Number.isFinite(remote.look_scale) && remote.look_scale > 5
+        ? remote.look_scale : 30;
+      const ey = THREE.MathUtils.clamp(curEyeYaw / lookScale, -1, 1);
+      const ep = THREE.MathUtils.clamp(curEyePitch / lookScale, -1, 1);
+
+      let eyePan = curEyeYaw, eyeTilt = curEyePitch;
+      let extraPan = 0, extraTilt = 0;
+      if (LOOK_MAX_DEG > 0) {
+        eyePan = THREE.MathUtils.clamp(curEyeYaw, -LOOK_MAX_DEG, LOOK_MAX_DEG);
+        eyeTilt = THREE.MathUtils.clamp(curEyePitch, -LOOK_MAX_DEG, LOOK_MAX_DEG);
+        extraPan = curEyeYaw - eyePan;
+        extraTilt = curEyePitch - eyeTilt;
+      }
+
+      // ---- 脖子 + 头 ----
+      const neck = vrm.humanoid.getNormalizedBoneNode('neck');
+      const head = vrm.humanoid.getNormalizedBoneNode('head');
+      const extraYawRad = THREE.MathUtils.degToRad(extraPan);
+      const extraPitchRad = THREE.MathUtils.degToRad(extraTilt);
+      if (neck) {
+        neck.rotation.y = curNeckYaw * 0.75 + extraYawRad * 0.75;
+        neck.rotation.x = curNeckPitch * 0.75 + extraPitchRad * 0.75;
+        neck.rotation.z = curNeckRoll * 0.75;
+      }
+      if (head) {
+        head.rotation.y = curNeckYaw * 0.25 + extraYawRad * 0.25;
+        head.rotation.x = curNeckPitch * 0.25 + extraPitchRad * 0.25;
+        head.rotation.z = curNeckRoll * 0.25;
+      }
+
+      // ---- 眼球：走 lookAt ----
+      // 目标点在头局部坐标系：VRM朝-Z前方，头右转=+x
+      try {
+        const headPos = new THREE.Vector3();
+        (head || vrm.scene).getWorldPosition(headPos);
+        const headQuat = new THREE.Quaternion();
+        (head || vrm.scene).getWorldQuaternion(headQuat);
+        const R = 2.0;
+        const ep = THREE.MathUtils.degToRad(eyePan * lookGain);
+        const et = THREE.MathUtils.degToRad(eyeTilt * lookGain);
+        // 头局部：+z是后方，-z是前方
+        const localDir = new THREE.Vector3(
+          Math.sin(ep),
+          tiltSign * Math.sin(et),
+          -Math.cos(ep)
+        );
+        localDir.applyQuaternion(headQuat);
+        gazeTarget.copy(headPos).addScaledVector(localDir, R);
+        vrm.lookAt.enabled = true;
+        if (typeof vrm.lookAt.lookAt === 'function') vrm.lookAt.lookAt(gazeTarget);
+      } catch (e) {
+        if (!lookAtBroken) {
+          lookAtBroken = true;
+          console.error('[gaze] lookAt 驱动失败，退回表情：', e);
+        }
+      }
+
+      // ---- 兜底：表达式再写一遍 ----
+      const em = vrm.expressionManager;
+      em.setValue('lookLeft',  Math.max(0, -ey));
+      em.setValue('lookRight', Math.max(0, ey));
+      em.setValue('lookUp',    Math.max(0, -ep));
+      em.setValue('lookDown',  Math.max(0, ep));
+      {
+        const el = document.getElementById('dbg');
+        if (el) {
+          const wR = em.getExpression('lookRight')?.weight;
+          const wL = em.getExpression('lookLeft')?.weight;
+          const conv = Number.isFinite(remote.eye_offset) ? remote.eye_offset.toFixed(2) : '-';
+          el.textContent = `cur=${curEyeYaw.toFixed(1)}° gain=${lookGain.toFixed(2)}× ` +
+            `tilt=${tiltSign > 0 ? '+' : '-'} max=${LOOK_MAX_DEG || 'off'} 会聚=${conv}° ` +
+            `wL=${wL === undefined ? 'n/a' : wL.toFixed(2)} ` +
+            `wR=${wR === undefined ? 'n/a' : wR.toFixed(2)}`;
+        }
+        // 状态族调试
+        const sf = document.getElementById('stateFam');
+        if (sf) sf.textContent = `状态: ${remote.state || '-'}`;
+        const di = document.getElementById('dimsInfo');
+        if (di && remote.dims) di.textContent = `arousal=${remote.dims.arousal} load=${remote.dims.load} fatigue=${remote.dims.fatigue}`;
+        // Presence 调试面板
+        renderPresence(remote.presence);
+      }
+      function renderPresence(p) {
+        if (!p) return;
+        if (renderT - preLast < 100) return;
+        preLast = renderT;
+        const $ = id => document.getElementById(id);
+        const set = (id, v) => { const el = $('' + id); if (el) el.textContent = v; };
+        set('preFam', p.family || '-');
+        set('prePrio', 'P' + p.priority);
+        set('preT', `驻留 ${(p.family_t||0).toFixed(1)}s · idle ${(p.idle_t||0).toFixed(1)}s`);
+        const tr = $('preTr');
+        if (tr) {
+          if (p.transition) {
+            tr.style.display = '';
+            set('preTrTo', p.transition.to);
+            const pct = Math.round((p.transition.progress||0)*100);
+            set('preTrPct', pct + '%');
+            const bar = $('preTrBar'); if (bar) bar.style.width = pct + '%';
+          } else tr.style.display = 'none';
+        }
+        const dims = p.dims || {}, ranges = p.ranges || {}, center = p.center || {};
+        const dimsEl = $('preDims');
+        if (dimsEl) dimsEl.innerHTML = Object.keys(dims).map(k => {
+          const v = dims[k], r = ranges[k] || [0,1], c = center[k] ?? v;
+          const bandL = r[0]*100, bandW = (r[1]-r[0])*100;
+          const fillW = Math.max(0, (v - r[0]) / (r[1]-r[0]) * 100);
+          return `<div class="dim"><span>${k}</span><div class="track">
+            <i class="band" style="left:${bandL}%;width:${bandW}%"></i>
+            <i class="fill" style="left:${bandL}%;width:${fillW}%"></i>
+            <i class="ctr" style="left:${c*100}%"></i></div><span>${v.toFixed(2)}</span></div>`;
+        }).join('');
+        set('preIdle', `无人 ${(p.idle_t||0).toFixed(1)}s / 35s`);
+      }
+      const b = remote.blink ?? 1.0;
+      const lidBlink = THREE.MathUtils.clamp((remote.lid_closure || 0) / 60, 0, 1);
+      const sampled = 1 - THREE.MathUtils.clamp(b, 0, 1);
+      // 有 age 基准时按时间重放（不受采样频率影响）；没有则退回采样值
+      const blinkW = (blinkAge0 === null)
+        ? sampled
+        : blinkWeightAt(blinkAge0 + (renderT - blinkRecvAt), blinkMs, blinkClose, blinkHold);
+      const blinkFinal = Math.max(blinkW, lidBlink, manualBlinkWeight());
+      em.setValue('blink', blinkFinal);
+      if (blinkEl) blinkEl.textContent =
+        `blink ${blinkFinal.toFixed(2)} | age0 ${blinkAge0 === null ? '-' : blinkAge0}`;
+      if (typeof window !== 'undefined') {
+        window.__blinkDbg = { blinkW, lidBlink, manual: manualBlinkWeight(), blinkFinal,
+                              age0: blinkAge0, recvAt: blinkRecvAt, renderT, blinkMs };
+      }
+
+      if (Math.random() < 0.1) {
+        statusEl.textContent = `远程: ${remote.state} ${remote.source} ` +
+          `颈=${remote.neck_yaw.toFixed(0)}° 眼=${remote.eye_yaw.toFixed(0)}°`;
+      }
+    } else {
+      // 无远程：cur* 收敛到 0（不是硬跳），键盘角度作为 neck 目标
+      const kn = 1 - Math.exp(-dt / 0.200);
+      curNeckYaw += (neckYaw - curNeckYaw) * kn;
+      curNeckPitch += (neckPitch - curNeckPitch) * kn;
+      curEyeYaw = curEyePitch = 0;
+      curNeckRoll += (0 - curNeckRoll) * kn;
+
+      const em = vrm.expressionManager;
+      em.setValue('lookLeft', 0); em.setValue('lookRight', 0);
+      em.setValue('lookUp', 0);   em.setValue('lookDown', 0);
+      vrm.lookAt.enabled = true;
+      vrm.lookAt?.lookAt(lookTarget);      // 兼容旧版 API
+      em.setValue('blink', manualBlinkWeight());
+      if (blinkEl) {
+        const age = lastMsgAt ? ((performance.now() - lastMsgAt) / 1000) : -1;
+        blinkEl.textContent = age < 0
+          ? 'blink - (从未收到数据)'
+          : `blink ${manualBlinkWeight().toFixed(2)} (无数据 ${age.toFixed(1)}s)`;
+      }
+
+      const neck = vrm.humanoid.getNormalizedBoneNode('neck');
+      const head = vrm.humanoid.getNormalizedBoneNode('head');
+      neckYaw = THREE.MathUtils.clamp(neckYaw, -0.8, 0.8);
+      neckPitch = THREE.MathUtils.clamp(neckPitch, -0.5, 0.5);
+      if (neck) { neck.rotation.y = curNeckYaw * 0.75; neck.rotation.x = curNeckPitch * 0.75; neck.rotation.z = curNeckRoll * 0.75; }
+      if (head) { head.rotation.y = curNeckYaw * 0.25; head.rotation.x = curNeckPitch * 0.25; head.rotation.z = curNeckRoll * 0.25; }
+    }
+    vrm.update(dt);
+  }
+  renderer.render(scene, cam);
+}
+tick();
+
+addEventListener('resize', () => {
+  cam.aspect = innerWidth/innerHeight;
+  cam.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

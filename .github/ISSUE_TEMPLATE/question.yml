@@ -1,0 +1,25 @@
+name: Question / setup help
+description: Installation, model weights, VRM or port questions
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, please skim the README quick start, `models/README.md` (weights are
+        not in the repo) and `docs/ASSETS.md` (what is deliberately missing).
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+      description: Commands, docs you followed, and the exact error text.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: Windows 11, Python 3.10, weights present, port 9000 free

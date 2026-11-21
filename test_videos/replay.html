@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>轨迹回放 - 数字人 vs 视频</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:monospace; display:flex; flex-direction:column; height:100vh; }
+  #topbar { padding:8px 12px; background:#1a1a1a; display:flex; gap:12px; align-items:center; }
+  #topbar button { padding:6px 16px; background:#2a6; border:none; color:#fff; border-radius:4px; cursor:pointer; }
+  #topbar select { padding:4px 8px; background:#333; color:#eee; border:1px solid #555; }
+  #main { display:flex; flex:1; overflow:hidden; }
+  #videoPane { flex:1; display:flex; align-items:center; justify-content:center; background:#000; }
+  #videoPane video { max-width:100%; max-height:100%; }
+  #headPane { width:400px; background:#1a1a2a; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; }
+  #info { position:absolute; bottom:10px; left:10px; font-size:12px; color:#aaa; line-height:1.5; }
+  #progress { height:4px; background:#333; }
+  #bar { height:100%; background:#4a8; width:0%; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <button id="playBtn">播放</button>
+  <select id="videoSelect"></select>
+  <span id="stateLabel" style="color:#7ee787">state: -</span>
+  <span id="angleLabel" style="color:#fa0">neck: 0° eye: 0°</span>
+</div>
+<div id="main">
+  <div id="videoPane"><video id="video" controls></video></div>
+  <div id="headPane">
+    <canvas id="headCanvas" width="360" height="360"></canvas>
+    <div id="info">state: -<br>neck_pan: 0°<br>eye_pan: 0°<br>faces: 0</div>
+  </div>
+</div>
+<div id="progress"><div id="bar"></div></div>
+
+<script>
+const videos = {
+  "03d04718 旅游人群": ["03d04718ae0ee72fe632cb5c0da6d16c.mp4", "trajectories/03d04718ae0ee72fe632cb5c0da6d16c.csv"],
+  "07f5ec65 多人": ["07f5ec6588b9e7fc8532e8e452ad3133.mp4", "trajectories/07f5ec6588b9e7fc8532e8e452ad3133.csv"],
+  "3558aa8d 办公室": ["3558aa8dd6c5c6aa8c6eb4ade9497187.mp4", "trajectories/3558aa8dd6c5c6aa8c6eb4ade9497187.csv"],
+  "399c4a7a 无人": ["399c4a7a4fb100d14ca6296b792b3565.mp4", "trajectories/399c4a7a4fb100d14ca6296b792b3565.csv"],
+  "49e1a261 短": ["49e1a2612552ccc0ee187152fbb54bfe.mp4", "trajectories/49e1a2612552ccc0ee187152fbb54bfe.csv"],
+  "4d6872b0 国旗无人": ["4d6872b037f75e9702bc93afe730f9f3.mp4", "trajectories/4d6872b037f75e9702bc93afe730f9f3.csv"],
+  "80aa4596 长视频": ["80aa4596af2e4eea463a8b1e09d4296a.mp4", "trajectories/80aa4596af2e4eea463a8b1e09d4296a.csv"],
+  "a1e8c310 草地": ["a1e8c3106e65bb015febe8969ff74ff4.mp4", "trajectories/a1e8c3106e65bb015febe8969ff74ff4.csv"],
+  "bbe32e8c 游客": ["bbe32e8c051f96a3ac4b6a0259eaf5e3.mp4", "trajectories/bbe32e8c051f96a3ac4b6a0259eaf5e3.csv"],
+  "c2fbd88e 汉服": ["c2fbd88ed1181897883f07dd5597153b.mp4", "trajectories/c2fbd88ed1181897883f07dd5597153b.csv"],
+};
+
+const sel = document.getElementById('videoSelect');
+for (const [name, v] of Object.entries(videos)) {
+  const opt = document.createElement('option');
+  opt.value = name; opt.textContent = name;
+  sel.appendChild(opt);
+}
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('headCanvas');
+const ctx = canvas.getContext('2d');
+let csvData = [];
+
+async function loadCSV(path) {
+  try {
+    const r = await fetch(path);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const txt = await r.text();
+    const lines = txt.trim().split('\n');
+    if (lines.length < 2) throw new Error('CSV空');
+    const hdr = lines[0].split(',');
+    return lines.slice(1).map(l => {
+      const v = l.split(',');
+      const o = {};
+      hdr.forEach((h,i) => o[h] = v[i]);
+      return o;
+    });
+  } catch(e) {
+    document.getElementById('stateLabel').textContent = `CSV缺失: ${path} (${e.message})`;
+    return [];
+  }
+}
+
+async function loadVideo(name) {
+  const [mp4, csv] = videos[name];
+  video.onerror = () => {
+    document.getElementById('stateLabel').textContent = `视频缺失: ${mp4}`;
+  };
+  video.src = mp4;
+  csvData = await loadCSV(csv);
+  document.getElementById('stateLabel').textContent = `state: loaded ${csvData.length} frames`;
+}
+
+sel.onchange = () => loadVideo(sel.value);
+document.getElementById('playBtn').onclick = () => { video.paused ? video.play() : video.pause(); };
+
+// 画一个简笔人头
+function drawHead(neckPan, neckTilt, eyePan, eyeTilt, lid, state) {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0,0,w,h);
+  ctx.save();
+  ctx.translate(w/2, h/2);
+
+  // 脖子/头部旋转
+  ctx.rotate(neckPan * Math.PI/180 * 0.3); // pan 偏航用 scale 模拟
+  const tiltY = neckTilt * 1.5; // tilt 俯仰
+
+  // 头（椭圆）
+  ctx.fillStyle = '#e8c9a0';
+  ctx.beginPath();
+  ctx.ellipse(0, tiltY, 70, 85, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.stroke();
+
+  // 眼睛位置（受 neckPan 整体偏移）
+  const eyeOffsetX = neckPan * 1.2;
+  const eyeOffsetY = tiltY * 0.5;
+
+  // 左眼
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.ellipse(-25 + eyeOffsetX, -15 + eyeOffsetY, 12, 8, 0, 0, Math.PI*2);
+  ctx.fill();
+  // 右眼
+  ctx.beginPath();
+  ctx.ellipse(25 + eyeOffsetX, -15 + eyeOffsetY, 12, 8, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // 瞳孔（受 eyePan 控制）
+  ctx.fillStyle = '#222';
+  const pupX = eyePan * 1.5;
+  const pupY = eyeTilt * 1.0;
+  ctx.beginPath();
+  ctx.arc(-25 + eyeOffsetX + pupX, -15 + eyeOffsetY + pupY, 4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(25 + eyeOffsetX + pupX, -15 + eyeOffsetY + pupY, 4, 0, Math.PI*2);
+  ctx.fill();
+
+  // 眨眼（lid closure）
+  if (lid > 0.3) {
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-35+eyeOffsetX, -15+eyeOffsetY);
+    ctx.lineTo(-15+eyeOffsetX, -15+eyeOffsetY);
+    ctx.moveTo(15+eyeOffsetX, -15+eyeOffsetY);
+    ctx.lineTo(35+eyeOffsetX, -15+eyeOffsetY);
+    ctx.stroke();
+  }
+
+  // 鼻子
+  ctx.strokeStyle = '#c8a880';
+  ctx.beginPath();
+  ctx.moveTo(0, 0+eyeOffsetY);
+  ctx.lineTo(0, 15+eyeOffsetY);
+  ctx.stroke();
+
+  // 嘴
+  ctx.beginPath();
+  ctx.moveTo(-10, 30+eyeOffsetY);
+  ctx.lineTo(10, 30+eyeOffsetY);
+  ctx.stroke();
+
+  // 状态色边框
+  const colors = {SCANNING:'#888', LOOKING_AT_PERSON:'#7ee787', GAZE_AWAY:'#fa0', RETURN:'#4af'};
+  ctx.strokeStyle = colors[state] || '#888';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, tiltY, 75, 90, 0, 0, Math.PI*2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+video.ontimeupdate = () => {
+  const t = video.currentTime * 1000;
+  // 找最近帧
+  let row = csvData[0];
+  for (const r of csvData) {
+    if (parseFloat(r.ts_ms) <= t) row = r;
+    else break;
+  }
+  const np = parseFloat(row.neck_pan)||0;
+  const nt = parseFloat(row.neck_tilt)||0;
+  const ep = parseFloat(row.eye_pan)||0;
+  const et = parseFloat(row.eye_tilt)||0;
+  const lid = parseFloat(row.lid)||0;
+  const st = row.state||'-';
+  const faces = row.n_faces||0;
+
+  drawHead(np, nt, ep, et, lid, st);
+  document.getElementById('stateLabel').textContent = `state: ${st}`;
+  document.getElementById('angleLabel').textContent = `neck: ${np.toFixed(1)}° eye: ${ep.toFixed(1)}°`;
+  document.getElementById('info').innerHTML =
+    `state: ${st}<br>neck_pan: ${np.toFixed(1)}°<br>neck_tilt: ${nt.toFixed(1)}°<br>eye_pan: ${ep.toFixed(1)}°<br>eye_tilt: ${et.toFixed(1)}°<br>faces: ${faces}`;
+  document.getElementById('bar').style.width = (video.currentTime/video.duration*100)+'%';
+};
+
+loadVideo(sel.value);
+</script>
+</body>
+</html>

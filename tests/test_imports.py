@@ -1,0 +1,10 @@
+def test_imports():
+    import p2_decision.geometry
+    import p2_decision.oculomotor
+    import p2_decision.config
+    import p2_decision.rng
+    import p2_decision.joint_mapper
+    import p2_decision.state_machine
+    import p2_decision.dynamics
+    import p2_decision.preset
+    import p2_decision.codec

@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>动作编辑器 - Gaze System</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e; color: #eee; padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { font-size: 20px; margin-bottom: 20px; color: #4cc9f0; }
+        
+        .toolbar { 
+            background: #16213e; padding: 15px; border-radius: 8px; 
+            margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap;
+        }
+        .toolbar label { font-size: 13px; color: #aaa; }
+        select, button {
+            background: #0f3460; color: #fff; border: none; padding: 8px 16px;
+            border-radius: 4px; cursor: pointer; font-size: 14px;
+        }
+        button:hover { background: #164880; }
+        button.primary { background: #4cc9f0; color: #000; font-weight: bold; }
+        button.primary:hover { background: #6dd5ed; }
+        
+        .sliders { display: flex; gap: 20px; margin-left: auto; }
+        .slider-group { display: flex; flex-direction: column; gap: 5px; }
+        .slider-group span { font-size: 12px; color: #aaa; }
+        input[type=range] { width: 100px; }
+        
+        .status { 
+            background: #16213e; padding: 10px 15px; border-radius: 8px; 
+            margin-bottom: 20px; font-size: 13px; color: #aaa;
+        }
+        .status .time { color: #4cc9f0; font-weight: bold; }
+        
+        .keyframes-table {
+            background: #16213e; border-radius: 8px; padding: 15px;
+        }
+        .keyframes-table h3 { font-size: 14px; margin-bottom: 10px; color: #aaa; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 8px 12px; text-align: right; }
+        th { color: #4cc9f0; border-bottom: 1px solid #0f3460; }
+        td { border-bottom: 1px solid #1a1a2e; }
+        td:first-child, th:first-child { text-align: left; }
+        
+        .export-area {
+            margin-top: 20px; background: #16213e; border-radius: 8px; padding: 15px;
+        }
+        .export-area textarea {
+            width: 100%; height: 200px; background: #0a0a1a; color: #4ee44e;
+            border: 1px solid #0f3460; border-radius: 4px; padding: 10px;
+            font-family: "Consolas", monospace; font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 动作编辑器</h1>
+        
+        <div class="toolbar">
+            <label>动作:</label>
+            <select id="actionSelect">
+                <option value="">选择动作...</option>
+            </select>
+            <button id="newActionBtn" style="background:#95e1d3; color:#000;">➕ 新建动作</button>
+            
+            <button id="playBtn" class="primary">▶ 播放</button>
+            <button id="loopBtn">🔁 循环: 开</button>
+            
+            <div class="sliders">
+                <div class="slider-group">
+                    <span>速度: <b id="speedVal">1.0x</b></span>
+                    <input type="range" id="speedSlider" min="0.2" max="3" step="0.1" value="1">
+                </div>
+                <div class="slider-group">
+                    <span>幅度: <b id="amplifyVal">1.0x</b></span>
+                    <input type="range" id="amplifySlider" min="0.5" max="3" step="0.1" value="1">
+                </div>
+                <div class="slider-group">
+                    <span>闭眼: <b id="blinkVal">1.0x</b></span>
+                    <input type="range" id="blinkSlider" min="0" max="2" step="0.1" value="1">
+                </div>
+            </div>
+        </div>
+        
+        <div class="status">
+            状态: <span id="statusText">就绪</span> | 
+            当前时间: <span class="time" id="timeDisplay">0.0s</span> / 
+            <span id="totalTime">0.0s</span>
+        </div>
+        
+        <div class="keyframes-table">
+            <h3 style="display:flex; justify-content:space-between; align-items:center;">
+                <span>关键帧列表 (t, pan, tilt, epan, etilt, lid, roll)</span>
+                <span>
+                    <button id="mirrorBtn" style="font-size:12px; padding:4px 8px; margin-right:8px;">🔄 左右镜像</button>
+                    <button id="addKfBtn" style="font-size:12px; padding:4px 8px; margin-right:8px;">➕ 加关键帧</button>
+                    <button id="saveBtn" style="font-size:12px; padding:4px 8px; background:#4ee44e; color:#000;">💾 保存动作</button>
+                </span>
+            </h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间(s)</th>
+                        <th>pan(°)</th>
+                        <th>tilt(°)</th>
+                        <th>epan(°)</th>
+                        <th>etilt(°)</th>
+                        <th>lid</th>
+                        <th>roll(°)</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="kfTableBody">
+                </tbody>
+            </table>
+        </div>
+        
+        <div style="background:#16213e; border-radius:8px; padding:15px; margin-top:20px;">
+            <h3 style="font-size:14px; margin-bottom:10px; color:#aaa;">参数曲线预览</h3>
+            <canvas id="curveCanvas" width="1140" height="200" style="background:#0a0a1a; border-radius:4px;"></canvas>
+            <div style="margin-top:8px; font-size:12px; color:#aaa;">
+                <span style="color:#ff6b6b;">● roll</span>
+                <span style="color:#4ecdc4; margin-left:15px;">● tilt</span>
+                <span style="color:#ffe66d; margin-left:15px;">● lid</span>
+                <span style="color:#95e1d3; margin-left:15px;">● epan</span>
+                <span style="color:#a8e6cf; margin-left:15px;">● etilt</span>
+            </div>
+        </div>
+        
+        <div class="export-area">
+            <h3 style="font-size:14px; margin-bottom:10px; color:#aaa;">导出Python代码</h3>
+            <button id="exportBtn">📋 导出代码</button>
+            <textarea id="exportArea" readonly placeholder="点击导出按钮生成代码..."></textarea>
+        </div>
+    </div>
+
+    <script>
+        let actions = {};
+        let currentAction = null;
+        let isPlaying = false;
+        let isLooping = true;
+        let playStartTime = 0;
+        let rafId = null;
+        let ws = null;
+        
+        // 初始化
+        fetch('/api/actions')
+            .then(r => r.json())
+            .then(data => {
+                actions = data;
+                refreshActionSelect();
+            });
+        
+        function refreshActionSelect() {
+            const select = document.getElementById('actionSelect');
+            const currentVal = select.value;
+            select.innerHTML = '<option value="">选择动作...</option>';
+            for (const [name, info] of Object.entries(actions)) {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = `${name} - ${info.desc}`;
+                select.appendChild(opt);
+            }
+            if (currentVal) select.value = currentVal;
+        }
+        
+        // 新建动作
+        document.getElementById('newActionBtn').addEventListener('click', async () => {
+            const name = prompt('动作名（大写字母，比如 TEST_MOVE）:');
+            if (!name) return;
+            const desc = prompt('动作描述（可选）:', '自定义动作') || '自定义动作';
+            
+            const res = await fetch('/api/new', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, desc: desc})
+            });
+            const result = await res.json();
+            if (result.ok) {
+                alert('新建成功！');
+                // 刷新动作列表
+                const res2 = await fetch('/api/actions');
+                actions = await res2.json();
+                refreshActionSelect();
+                // 自动选中新动作
+                document.getElementById('actionSelect').value = result.name;
+                document.getElementById('actionSelect').dispatchEvent(new Event('change'));
+            } else {
+                alert('新建失败: ' + result.error);
+            }
+        });
+        
+        // 动作选择
+        document.getElementById('actionSelect').addEventListener('change', async (e) => {
+            const name = e.target.value;
+            if (!name) return;
+            const res = await fetch(`/api/action/${name}`);
+            currentAction = await res.json();
+            document.getElementById('totalTime').textContent = currentAction.dur.toFixed(1) + 's';
+            renderTable(currentAction.keyframes);
+        });
+        
+        function renderTable(kfs) {
+            const tbody = document.getElementById('kfTableBody');
+            tbody.innerHTML = '';
+            console.log('renderTable called, kfs:', kfs);
+            kfs.forEach((kf, idx) => {
+                const tr = document.createElement('tr');
+                
+                for (let col = 0; col < 7; col++) {
+                    const td = document.createElement('td');
+                    const inp = document.createElement('input');
+                    inp.type = 'number';
+                    inp.step = col === 0 ? 0.05 : 0.5;
+                    inp.value = kf[col];
+                    inp.dataset.idx = idx;
+                    inp.dataset.col = col;
+                    inp.style.cssText = 'width:60px; background:#0a0a1a; color:#eee; border:1px solid #0f3460; padding:4px; text-align:right;';
+                    inp.addEventListener('change', onKfChange);
+                    td.appendChild(inp);
+                    tr.appendChild(td);
+                }
+                
+                // 删除按钮
+                const tdDel = document.createElement('td');
+                const btn = document.createElement('button');
+                btn.textContent = '✕';
+                btn.dataset.idx = idx;
+                btn.style.cssText = 'background:#ff6b6b; color:#000; border:none; padding:4px 8px; border-radius:3px; cursor:pointer; font-size:12px;';
+                btn.addEventListener('click', onDelKf);
+                tdDel.appendChild(btn);
+                tr.appendChild(tdDel);
+                
+                tbody.appendChild(tr);
+            });
+            
+            drawChart();
+        }
+        
+        function onKfChange(e) {
+            const idx = parseInt(e.target.dataset.idx);
+            const col = parseInt(e.target.dataset.col);
+            const val = parseFloat(e.target.value);
+            currentAction.keyframes[idx][col] = val;
+            // 按时间排序
+            currentAction.keyframes.sort((a, b) => a[0] - b[0]);
+            renderTable(currentAction.keyframes);
+        }
+        
+        function onDelKf(e) {
+            const idx = parseInt(e.target.dataset.idx);
+            if (currentAction.keyframes.length <= 2) {
+                alert('至少保留2个关键帧');
+                return;
+            }
+            currentAction.keyframes.splice(idx, 1);
+            renderTable(currentAction.keyframes);
+        }
+        
+        // 加关键帧
+        document.getElementById('addKfBtn').addEventListener('click', () => {
+            if (!currentAction) return;
+            // 在最后加一个关键帧，时间是总时长
+            const lastT = currentAction.dur;
+            currentAction.keyframes.push([lastT, 0, 0, 0, 0, 0, 0]);
+            renderTable(currentAction.keyframes);
+        });
+        
+        // 左右镜像（pan, epan, roll取反）
+        document.getElementById('mirrorBtn').addEventListener('click', () => {
+            if (!currentAction) return;
+            if (!confirm('左右镜像会把pan/epan/roll都取反，继续？')) return;
+            currentAction.keyframes.forEach(kf => {
+                kf[1] = -kf[1];  // pan
+                kf[3] = -kf[3];  // epan
+                kf[6] = -kf[6];  // roll
+            });
+            renderTable(currentAction.keyframes);
+        });
+        
+        // 保存动作
+        document.getElementById('saveBtn').addEventListener('click', async () => {
+            if (!currentAction) return;
+            const name = document.getElementById('actionSelect').value;
+            // 计算总时长（最后一个关键帧的时间）
+            const dur = currentAction.keyframes[currentAction.keyframes.length - 1][0];
+            
+            const res = await fetch(`/api/save/${name}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    keyframes: currentAction.keyframes,
+                    dur: dur
+                })
+            });
+            const result = await res.json();
+            if (result.ok) {
+                alert('保存成功！');
+                currentAction.dur = dur;
+                document.getElementById('totalTime').textContent = dur.toFixed(1) + 's';
+            } else {
+                alert('保存失败: ' + result.error);
+            }
+        });
+        
+        // 绘制曲线（每个参数单独归一化，分上下两行）
+        function drawChart() {
+            const canvas = document.getElementById('curveCanvas');
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            
+            if (!currentAction) return;
+            
+            const kfs = currentAction.keyframes;
+            const dur = currentAction.dur;
+            
+            const padX = 40;
+            const padY = 10;
+            const chartW = w - padX * 2;
+            const rowH = (h - padY * 2) / 2;  // 两行：上面是头（pan/tilt/roll），下面是眼+lid
+            
+            // 画水平中线
+            ctx.strokeStyle = '#1a1a2e';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padX, padY + rowH);
+            ctx.lineTo(w - padX, padY + rowH);
+            ctx.stroke();
+            
+            // 头参数（pan, tilt, roll）- 上行
+            const headParams = [
+                {col: 1, name: 'pan', color: '#ff6b6b'},
+                {col: 2, name: 'tilt', color: '#4ecdc4'},
+                {col: 6, name: 'roll', color: '#ffe66d'},
+            ];
+            // 找头参数最大值
+            let headMax = 1;
+            kfs.forEach(kf => {
+                headMax = Math.max(headMax, Math.abs(kf[1]), Math.abs(kf[2]), Math.abs(kf[6]));
+            });
+            
+            headParams.forEach(p => {
+                ctx.strokeStyle = p.color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < kfs.length - 1; i++) {
+                    const k0 = kfs[i];
+                    const k1 = kfs[i + 1];
+                    const steps = 20;
+                    for (let s = 0; s <= steps; s++) {
+                        const f = s / steps;
+                        const f2 = f * f * f * (f * (f * 6 - 15) + 10);
+                        const t = k0[0] + (k1[0] - k0[0]) * f;
+                        const val = k0[p.col] + (k1[p.col] - k0[p.col]) * f2;
+                        const x = padX + (t / dur) * chartW;
+                        const y = padY + rowH / 2 - (val / headMax) * rowH / 2 * 0.8;
+                        if (i === 0 && s === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+            });
+            
+            // 眼参数（epan, etilt, lid）- 下行
+            const eyeParams = [
+                {col: 3, name: 'epan', color: '#95e1d3'},
+                {col: 4, name: 'etilt', color: '#a8e6cf'},
+                {col: 5, name: 'lid', color: '#c7ceea'},
+            ];
+            
+            eyeParams.forEach(p => {
+                ctx.strokeStyle = p.color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < kfs.length - 1; i++) {
+                    const k0 = kfs[i];
+                    const k1 = kfs[i + 1];
+                    const steps = 20;
+                    for (let s = 0; s <= steps; s++) {
+                        const f = s / steps;
+                        const f2 = f * f * f * (f * (f * 6 - 15) + 10);
+                        const t = k0[0] + (k1[0] - k0[0]) * f;
+                        const val = k0[p.col] + (k1[p.col] - k0[p.col]) * f2;
+                        const x = padX + (t / dur) * chartW;
+                        // lid是0-1，从下往上画
+                        const y = padY + rowH + rowH - (val / 1.0) * rowH * 0.8;
+                        if (i === 0 && s === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                }
+                ctx.stroke();
+            });
+            
+            // 画关键帧点
+            kfs.forEach(kf => {
+                const x = padX + (kf[0] / dur) * chartW;
+                ctx.fillStyle = '#fff';
+                // 上行头参数
+                [1, 2, 6].forEach(col => {
+                    const y = padY + rowH / 2 - (kf[col] / headMax) * rowH / 2 * 0.8;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                // 下行眼参数
+                [3, 4, 5].forEach(col => {
+                    const y = padY + rowH + rowH - (kf[col] / 1.0) * rowH * 0.8;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            });
+        }
+        
+        // 滑块
+        document.getElementById('speedSlider').addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = val.toFixed(1) + 'x';
+            if (isPlaying) updateParams();
+        });
+        document.getElementById('amplifySlider').addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            document.getElementById('amplifyVal').textContent = val.toFixed(1) + 'x';
+            if (isPlaying) updateParams();
+        });
+        document.getElementById('blinkSlider').addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            document.getElementById('blinkVal').textContent = val.toFixed(1) + 'x';
+            if (isPlaying) updateParams();
+        });
+        
+        function updateParams() {
+            fetch('/api/params', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    speed: parseFloat(document.getElementById('speedSlider').value),
+                    amplify: parseFloat(document.getElementById('amplifySlider').value),
+                    blink: parseFloat(document.getElementById('blinkSlider').value),
+                })
+            });
+        }
+        
+        // 播放/暂停
+        document.getElementById('playBtn').addEventListener('click', () => {
+            if (!currentAction) { alert('先选一个动作'); return; }
+            if (isPlaying) {
+                stopPlayback();
+            } else {
+                startPlayback();
+            }
+        });
+        
+        document.getElementById('loopBtn').addEventListener('click', () => {
+            isLooping = !isLooping;
+            document.getElementById('loopBtn').textContent = `🔁 循环: ${isLooping ? '开' : '关'}`;
+            
+            // 如果正在播放，重启播放让设置生效
+            if (isPlaying) {
+                stopPlayback();
+                setTimeout(startPlayback, 100);
+            }
+        });
+        
+        function startPlayback() {
+            if (!currentAction) { alert('先选一个动作'); return; }
+            isPlaying = true;
+            document.getElementById('playBtn').textContent = '⏸ 暂停';
+            document.getElementById('statusText').textContent = '播放中';
+            playStartTime = performance.now();
+            
+            const speed = parseFloat(document.getElementById('speedSlider').value);
+            const amplify = parseFloat(document.getElementById('amplifySlider').value);
+            const blink = parseFloat(document.getElementById('blinkSlider').value);
+            
+            fetch('/api/play', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    action: document.getElementById('actionSelect').value,
+                    speed: speed,
+                    amplify: amplify,
+                    blink: blink,
+                    loop: isLooping
+                })
+            });
+            
+            tick();
+        }
+        
+        function stopPlayback() {
+            isPlaying = false;
+            document.getElementById('playBtn').textContent = '▶ 播放';
+            document.getElementById('statusText').textContent = '已暂停';
+            
+            fetch('/api/stop', {method: 'POST'});
+        }
+        
+        function tick() {
+            if (!isPlaying) return;
+            
+            const speed = parseFloat(document.getElementById('speedSlider').value);
+            const elapsedReal = (performance.now() - playStartTime) / 1000;
+            const elapsed = elapsedReal * speed;
+            
+            if (elapsed >= currentAction.dur && !isLooping) {
+                stopPlayback();
+                return;
+            }
+            
+            document.getElementById('timeDisplay').textContent = 
+                (elapsed % currentAction.dur).toFixed(2) + 's';
+            
+            rafId = requestAnimationFrame(tick);
+        }
+        
+        // 导出
+        document.getElementById('exportBtn').addEventListener('click', async () => {
+            const name = document.getElementById('actionSelect').value;
+            if (!name) return;
+            const res = await fetch(`/api/export/${name}`);
+            const code = await res.text();
+            document.getElementById('exportArea').value = code;
+        });
+    </script>
+</body>
+</html>

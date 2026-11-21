@@ -1,0 +1,32 @@
+name: Feature or behaviour idea
+description: A new capability, tuning idea, or "the head should do X"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Behaviour ideas are the point of this project — especially ones you can describe in
+        terms of timing, angles or state. Vague "make it more natural" is hard to act on;
+        "hold LISTENING 40% longer" is easy.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What should change
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Where does it belong
+      options:
+        - Not sure
+        - Parameters only (config.py)
+        - p2_decision logic
+        - p1_perception
+        - p3_exec / hardware
+        - Renderer / tooling
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is worth it
+      description: What looks wrong today, who it affects, how you would notice it got better.

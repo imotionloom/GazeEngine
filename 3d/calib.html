@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>标定向导 C1–C7</title>
+<style>
+  :root{--bg:#14171c;--panel:#1c2027;--line:#2c323c;--fg:#e8eaed;--dim:#8b929e;
+        --ok:#37d67a;--warn:#f5a623;--bad:#e5484d;--accent:#4c8dff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.6 system-ui,"Segoe UI",sans-serif;height:100vh;overflow:hidden}
+  header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:14px;margin:0;font-weight:600}
+  .pill{padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--dim);font-size:11px}
+  .pill.on{color:#0b0;border-color:#1d5c33;background:#0f2a19}
+  .spacer{flex:1}
+  main{display:grid;grid-template-columns:220px 1fr 300px;height:calc(100vh - 49px)}
+  nav{border-right:1px solid var(--line);padding:8px;overflow:auto}
+  .step{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;gap:8px;align-items:center;margin-bottom:2px;color:var(--dim)}
+  .step:hover{background:#232833}
+  .step.active{background:#232833;color:var(--fg)}
+  .step .dot{width:16px;text-align:center}
+  .step.done .dot{color:var(--ok)}
+  .step.warn .dot{color:var(--warn)}
+  .step.fail .dot{color:var(--bad)}
+  section{padding:18px 22px;overflow:auto}
+  h2{font-size:15px;margin:0 0 6px}
+  .desc{color:var(--dim);margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h3{margin:0 0 10px;font-size:13px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+  label{display:block;font-size:11px;color:var(--dim);margin-bottom:3px}
+  input{width:100%;background:#11141a;border:1px solid var(--line);color:var(--fg);padding:6px 8px;border-radius:4px;font:inherit}
+  button{background:#2a303a;border:1px solid var(--line);color:var(--fg);padding:7px 12px;border-radius:5px;cursor:pointer;font:inherit}
+  button:hover{background:#333b47}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  aside{border-left:1px solid var(--line);padding:14px;overflow:auto;background:var(--panel)}
+  aside h3{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}
+  #log{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all}
+  .verdict{font-weight:600}
+  .verdict.pass{color:var(--ok)} .verdict.warn{color:var(--warn)} .verdict.fail{color:var(--bad)}
+  .bar{height:4px;background:#11141a;border-radius:2px;overflow:hidden;margin:8px 0}
+  .bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+  .hint{color:var(--dim);font-size:12px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  canvas{background:#0e1015;border:1px solid var(--line);border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>标定向导</h1>
+  <span class="pill" id="backend">后端 …</span>
+  <span class="pill" id="conn">未连接</span>
+  <span class="spacer"></span>
+  <span class="pill" id="progress">0 / 7</span>
+  <span class="pill" id="build"></span>
+  <button id="btnStatus">查看 active.json</button>
+</header>
+
+<main>
+  <nav id="steps"></nav>
+
+  <section id="panel"></section>
+
+  <aside>
+    <h3>日志</h3>
+    <div id="log"></div>
+    <h3 style="margin-top:18px">本步判定</h3>
+    <div id="verdict" class="hint">—</div>
+  </aside>
+</main>
+
+<script>
+// WS 端口 = 页面端口 + 1（桥默认 http=9100 / ws=9101，被占用时会成对后移）
+// 端口不写死：桥被占用时会成对后移，这里按候选依次探测
+const WS_CANDIDATES = (() => {
+  // 优先 9101（方案 B：9000 被 ws_bridge 占着），9000 仅作兜底（方案 A）
+  const list = [];
+  for (const p of [9101, 9103, 9102, 9000, 9104, 9105, 9106,
+                   (location.port ? Number(location.port) + 1 : 9101)]) {
+    if (p > 1024 && !list.includes(p)) list.push(p);
+  }
+  return list;
+})();
+let wsPort = null, scanning = false;
+const STEP_ORDER = ['c1','c2','c3','c4','c5','c6','c7'];
+let ws = null, state = {
+  steps: {}, current: null, saved: new Set(), results: {}, dial: {pan:0, tilt:0},
+  pointIdx: 0, donePoints: new Set(), mode: 'both',
+  c2DistStage: 0, c2Distances: new Set()
+};
+
+// WS 消息兼容：可能收到文本帧(string)或二进制帧(Blob)
+function readMsg(ev, cb) {
+  const d = ev.data;
+  if (typeof d === 'string') { cb(d); return; }
+  if (d && typeof d.text === 'function') { d.text().then(cb).catch(() => {}); return; }
+  if (d instanceof ArrayBuffer) { cb(new TextDecoder().decode(d)); }
+}
+
+const $ = s => document.querySelector(s);
+const STEP_DEG = 0.5;          // 摆位步长：按钮与键盘共用这一个值
+// 3×3 网格（tilt<0 = 向上看），9 点顺序：左上→上中→右上→左中→正中→右中→左下→下中→右下
+const GRID_POINTS = [
+  {id:'lt', name:'左上', pan:-20, tilt:-15}, {id:'ct', name:'上中', pan:0, tilt:-15}, {id:'rt', name:'右上', pan:20, tilt:-15},
+  {id:'lm', name:'左中', pan:-20, tilt:0},   {id:'cm', name:'正中', pan:0, tilt:0},   {id:'rm', name:'右中', pan:20, tilt:0},
+  {id:'lb', name:'左下', pan:-20, tilt:15},  {id:'cb', name:'下中', pan:0, tilt:15},  {id:'rb', name:'右下', pan:20, tilt:15},
+];
+const EYE_SPLIT_DEG = 15;      // 与运行时 EYE_REST_PAN_DEG 一致：眼睛最多 15°，其余给脖子
+
+const BUILD = 'v2026-10-28c';
+const THREE_clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const logEl = $('#log');
+function log(msg){
+  const t = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+  if (logEl.textContent.length > 8000) logEl.textContent = logEl.textContent.slice(0,8000);
+}
+
+/* ---------------- 连接 ---------------- */
+function connect(){
+  if (scanning) return;
+  scanning = true;
+  let i = 0;
+
+  const next = () => {
+    if (i >= WS_CANDIDATES.length) {
+      scanning = false;
+      $('#conn').textContent = '未连接（重试中）';
+      setTimeout(connect, 3000);
+      return;
+    }
+    const port = WS_CANDIDATES[i++];
+    let sock;
+    try { sock = new WebSocket(`ws://${location.hostname || '127.0.0.1'}:${port}`); }
+    catch (e) { return next(); }
+
+    let done = false;
+    const abandon = (delay) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hardTimer);
+      try { sock.close(); } catch (e) {}
+      setTimeout(next, delay || 0);
+    };
+    // 关键：onopen 成功不代表连对了（ws_bridge 也会握手成功但只推数据），
+    // 必须 1.2s 内收到 hello 才算标定桥
+    const hardTimer = setTimeout(() => abandon(0), 1200);
+
+    sock.onopen = () => {
+      if (!done) $('#conn').textContent = `探测 :${port}…`;
+    };
+    sock.onmessage = ev => readMsg(ev, t => {
+      let m; try { m = JSON.parse(t); } catch { return; }
+      if (!done && m.evt === 'hello') {
+        done = true;
+        clearTimeout(hardTimer);
+        ws = sock; wsPort = port; scanning = false;
+        $('#conn').textContent = `已连接 :${port}`;
+        $('#conn').classList.add('on');
+        log(`已连接标定桥 :${port}（后端 ${m.backend}）`);
+        handle(m);
+        sock.onclose = () => {
+          $('#conn').textContent = '断开，重连中…';
+          $('#conn').classList.remove('on');
+          if (ws === sock) ws = null;
+          setTimeout(connect, 1500);
+        };
+        sock.onerror = () => {};
+        return;
+      }
+      handle(m);
+    });
+    sock.onerror = () => abandon(0);
+    sock.onclose = () => { if (!done) abandon(0); };
+  };
+  next();
+}
+function send(obj){
+  if (!ws || ws.readyState !== 1) return false;
+  ws.send(JSON.stringify(obj));
+  return true;
+}
+
+/* ---------------- 消息处理 ---------------- */
+function handle(msg){
+  switch(msg.evt){
+    case 'hello':
+      state.backend = msg.backend;
+      msg.steps.forEach(s => state.steps[s.id] = s);
+      msg.saved.forEach(k => state.saved.add(k));
+      $('#backend').textContent = '后端 ' + msg.backend;
+      if (!state.current) state.current = STEP_ORDER.find(id => !isDone(stepKey(id))) || 'c7';
+      renderAll();
+      log(`已连接，后端=${msg.backend}，已存 ${msg.saved.length} 步`);
+      break;
+    case 'step.begin':
+      renderPanel(msg.step);
+      break;
+    case 'step.sample':
+      log(`采样 #${msg.count}: ${JSON.stringify(msg.payload)}`);
+      renderPanel(msg.step, true);
+      break;
+    case 'calib.progress': {
+      const bar = document.querySelector('.bar i');
+      if (bar) bar.style.width = Math.round(100*msg.done/msg.total) + '%';
+      log(`进度 ${msg.done}/${msg.total} ${msg.note||''}`);
+      break;
+    }
+    case 'calib.result':
+      state.results[msg.step] = msg;
+      if (msg.saved !== false) state.saved.add(stepKey(msg.step));   // saved:false 不标完成
+      renderAll();
+      renderResult(msg);
+      log(`结果 ${msg.step}: ${msg.verdict}`);
+      break;
+    case 'calib.status':
+      showActive(msg.active);
+      break;
+    case 'calib.pose':
+      log(`↩ 桥已确认 eye_yaw=${msg.pose.eye_yaw} eye_tilt=${msg.pose.eye_tilt}`);
+      break;
+    case 'error':
+      log('错误: ' + msg.message);
+      break;
+    case 'calib.aborted':
+      log('已中止');
+      break;
+  }
+}
+
+const stepKey = id => ({c1:'c1_camera',c2:'c2_hand_eye',c3:'c3_servo',c4:'c4_distance',
+                        c5:'c5_latency',c6:'c6_look',c7:'c7_precision'})[id];
+const isDone = key => state.saved.has(key);
+
+/* ---------------- 渲染 ---------------- */
+function renderAll(){
+  const nav = $('#steps');
+  nav.innerHTML = '';
+  STEP_ORDER.forEach((id, i) => {
+    const meta = state.steps[id] || {title:id, mode:''};
+    const done = isDone(stepKey(id));
+    const res = state.results[id];
+    const cls = ['step'];
+    if (id === state.current) cls.push('active');
+    if (done) cls.push('done');
+    if (res && res.verdict === 'warn') cls.push('warn');
+    const mark = done ? '✅' : (res && res.verdict==='warn' ? '⚠️' : '○');
+    nav.insertAdjacentHTML('beforeend',
+      `<div class="${cls.join(' ')}" data-id="${id}">
+         <span class="dot">${mark}</span><span>${i+1}. ${meta.title}</span>
+       </div>`);
+  });
+  nav.querySelectorAll('.step').forEach(el => el.onclick = () => selectStep(el.dataset.id));
+  const doneCount = STEP_ORDER.filter(id => isDone(stepKey(id))).length;
+  $('#progress').textContent = `${doneCount} / 7`;
+  if (state.current) renderPanel(state.current);
+}
+
+function selectStep(id){
+  state.current = id;
+  send({cmd:'calib.start', step:id});
+  renderAll();
+}
+
+function renderPanel(id, keepInputs){
+  const meta = state.steps[id] || {title:id, desc:'', mode:''};
+  const panel = $('#panel');
+  // keepInputs: 采样后保留当前输入值，不重置
+  const prev = keepInputs ? {} : null;
+  if (keepInputs) {
+    document.querySelectorAll('#panel input, #panel select').forEach(el => {
+      if (el.type === 'radio') {
+        if (el.checked) prev['radio_' + el.name] = el.value;
+      } else {
+        prev[el.name || el.id] = el.value;
+      }
+    });
+    // 保存计数 span
+    document.querySelectorAll('#panel span[id]').forEach(el => {
+      prev['span_' + el.id] = el.textContent;
+    });
+  }
+  panel.innerHTML = `<h2>${STEP_ORDER.indexOf(id)+1}. ${meta.title}</h2>
+    <div class="desc">${meta.desc||''}</div>
+    <div id="body"></div>`;
+  const body = $('#body');
+  if (id === 'c1') body.innerHTML = panelC1();
+  else if (id === 'c2') body.innerHTML = panelC2();
+  else if (id === 'c4') body.innerHTML = panelC4();
+  else body.innerHTML = panelAuto(id);
+  if (keepInputs) {
+    document.querySelectorAll('#panel input, #panel select').forEach(el => {
+      if (el.type === 'radio') {
+        const checkedVal = prev['radio_' + el.name];
+        if (checkedVal !== undefined) el.checked = (el.value === checkedVal);
+      } else {
+        const k = el.name || el.id;
+        if (prev[k] !== undefined) el.value = prev[k];
+      }
+    });
+    // 恢复计数 span
+    document.querySelectorAll('#panel span[id]').forEach(el => {
+      const txt = prev['span_' + el.id];
+      if (txt !== undefined) el.textContent = txt;
+    });
+  }
+  bindPanel(id);
+}
+
+/* ---- C1 ---- */
+function panelC1(){
+  return `<div class="card"><h3>采集</h3>
+    <div class="row" style="margin-bottom:8px">
+      <label style="margin-right:12px"><input type="radio" name="c1_axis" value="h" checked> 水平 (pan/u)</label>
+      <label><input type="radio" name="c1_axis" value="v"> 垂直 (tilt/v)</label>
+    </div>
+    <div class="grid">
+      <div><label>水平角度 (°)</label><input id="c1_angle" type="number" step="0.1" value="25"></div>
+      <div><label>像素 u</label><input id="c1_u" type="number" step="1" value="522"></div>
+      <div><label>俯仰角度 (°)</label><input id="c1_tilt" type="number" step="0.1" value="0"></div>
+      <div><label>像素 v</label><input id="c1_v" type="number" step="1" value="240"></div>
+    </div>
+    <div class="row">
+      <button class="primary" id="c1_add">采集此点（空格）</button>
+      <button id="c1_fit">拟合</button>
+      <span class="hint" id="c1_count">已采 0 点</span>
+    </div>
+    <div class="hint" style="margin-top:8px">水平 ≥3 点（−35/−25/−15/0/+15/+25/+35）；垂直 ≥3 点（−20/0/+20）</div>
+  </div>
+  <div class="card"><h3>样本</h3><div id="tbl"></div></div>`;
+}
+
+/* ---- C2 ---- */
+function panelC2(){
+  const p = GRID_POINTS[state.pointIdx] || GRID_POINTS[4];
+  const cells = GRID_POINTS.map((q, i) => {
+    const cur = i === state.pointIdx;
+    const done = state.donePoints.has(q.id + '_d' + state.c2DistStage);
+    return `<div data-point="${i}" style="aspect-ratio:1;display:flex;align-items:center;justify-content:center;
+      border-radius:6px;cursor:pointer;font-size:12px;
+      background:${cur ? '#2d6' : (done ? '#1f3a2a' : '#2a303a')};color:${cur ? '#000' : '#c9cfd8'};
+      border:1px solid ${cur ? '#2d6' : '#2c323c'}">${q.name}</div>`;
+  }).join('');
+  return `<div class="card"><h3>标定点（第 ${state.pointIdx + 1}/9 点：${p.name}）</h3>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;max-width:240px">${cells}</div>
+    <div class="hint" style="margin-top:6px">把对位杆放到该格对应位置，再调视线</div>
+  </div>
+  <div class="card"><h3>当前指令</h3>
+    <div class="grid">
+      <div><label>pan (°)</label><input id="c2_pan" type="number" step="0.5" value="0"></div>
+      <div><label>tilt (°)</label><input id="c2_tilt" type="number" step="0.5" value="0"></div>
+    </div>
+    <div class="row">
+      <label style="color:#8b929e">控制:</label>
+      <button data-mode="eye">眼睛</button><button data-mode="neck">脖子</button><button data-mode="both">联动</button>
+      <span class="hint" id="c2_mode_hint"></span>
+    </div>
+    <div class="row">
+      <button data-adj="${-STEP_DEG},0">←</button><button data-adj="0,${-STEP_DEG}">↑</button>
+      <button data-adj="0,${STEP_DEG}">↓</button><button data-adj="${STEP_DEG},0">→</button>
+      <button id="c2_center">回中</button>
+      <span class="hint">范围 ±30°；↑=向上看 ↓=向下看（步长 ${STEP_DEG}°，Shift ${STEP_DEG*5}°）</span>
+    </div>
+    <canvas id="c2_canvas" width="260" height="180" style="margin-top:10px"></canvas>
+  </div>
+  <div class="card"><h3>采集</h3>
+    <div class="grid">
+      <div><label>距离 d (m)</label><input id="c2_d" type="number" step="0.1" value="0.8"></div>
+      <div><label>系统 pan_cam (°)</label><input id="c2_pc" type="number" step="0.1" value="0"></div>
+      <div><label>系统 tilt_cam (°)</label><input id="c2_tc" type="number" step="0.1" value="0"></div>
+    </div>
+    <div class="row">
+      <button class="primary" id="c2_add">采集此点（空格）</button>
+      <button id="c2_fit">拟合</button>
+      <span class="hint" id="c2_count">已采 0 点</span>
+    </div>
+  </div>
+  <div class="card"><h3>样本</h3><div id="tbl"></div></div>`;
+}
+
+/* ---- C4 ---- */
+function panelC4(){
+  return `<div class="card"><h3>采集</h3>
+    <div class="grid">
+      <div><label>距离 (m)</label><input id="c4_d" type="number" step="0.1" value="1.0"></div>
+      <div><label>眼距像素</label><input id="c4_px" type="number" step="1" value="49"></div>
+    </div>
+    <div class="row">
+      <button class="primary" id="c4_add">采集此点（空格）</button>
+      <button id="c4_fit">拟合</button>
+      <span class="hint" id="c4_count">已采 0 点</span>
+    </div>
+    <div class="hint" style="margin-top:8px">建议：0.5 / 1.0 / 2.0 m 各测一次</div>
+  </div>
+  <div class="card"><h3>样本</h3><div id="tbl"></div></div>`;
+}
+
+/* ---- 自动步骤 ---- */
+function panelAuto(id){
+  const label = {c3:'开始标定（先扫极限，再扫线性）',c5:'开始测量',c6:'开始扫描量程',c7:'开始精度标定'}[id];
+  const extra = id === 'c3'
+    ? `<button id="auto_quick">快速复验（开机用）</button>
+       <span class="hint">只验证已标定极值的 90% 仍可达</span>` : '';
+  return `<div class="card"><h3>自动执行</h3>
+    <div class="hint">本步由后端驱动，页面只显示进度与结果。
+      ${id==='c3'?'<br><b>阶段 1/2：极限</b>（成对测左右/上下）→ <b>阶段 2/2：零点与线性</b>':''}</div>
+    <div class="bar" id="bar"><i></i></div>
+    <div class="row"><button class="primary" id="auto_run">${label}</button>${extra}</div>
+  </div>
+  <div class="card"><h3>结果</h3><div id="tbl" class="hint">尚未执行</div></div>`;
+}
+
+/* ---------------- 绑定 ---------------- */
+function bindPanel(id){
+  const addSample = (payload) => {
+    send({cmd:'calib.sample', step:id, payload});
+    // 本地计数+1，不重建面板（保留输入框内容）
+    const cnt = $(`#${id}_count`);
+    if (cnt) {
+      const m = cnt.textContent.match(/(\d+)/);
+      const n = m ? parseInt(m[1])+1 : 1;
+      cnt.textContent = cnt.textContent.replace(/\d+/, n);
+    }
+  };
+  if (id === 'c1'){
+    $('#c1_add').onclick = () => {
+      const axis = document.querySelector('input[name=c1_axis]:checked').value;
+      if (axis === 'h') {
+        const angle = parseFloat($('#c1_angle').value);
+        const u = parseFloat($('#c1_u').value);
+        if (!isFinite(angle) || !isFinite(u)) { log('角度和 u 必须填数字'); return; }
+        addSample({axis:'h', angle, u});
+      } else {
+        const tilt = parseFloat($('#c1_tilt').value);
+        const v = parseFloat($('#c1_v').value);
+        if (!isFinite(tilt) || !isFinite(v)) { log('俯仰角和 v 必须填数字'); return; }
+        addSample({axis:'v', tilt, v});
+      }
+    };
+    $('#c1_fit').onclick = () => send({cmd:'calib.fit', step:'c1'});
+  }
+  if (id === 'c2'){
+    const splitTotal = (total) => {
+      // 与运行时一致：眼睛最多 EYE_SPLIT_DEG，其余交给脖子
+      if (state.mode === 'eye')  return { neck: 0, eye: total };
+      if (state.mode === 'neck') return { neck: total, eye: 0 };
+      const eye = Math.max(-EYE_SPLIT_DEG, Math.min(EYE_SPLIT_DEG, total));
+      return { neck: total - eye, eye };
+    };
+
+    const setDial = (pan, tilt) => {
+      state.dial.pan = Math.max(-30, Math.min(30, pan));
+      state.dial.tilt = Math.max(-30, Math.min(30, tilt));
+      $('#c2_pan').value = state.dial.pan.toFixed(1);
+      $('#c2_tilt').value = state.dial.tilt.toFixed(1);
+
+      const pn = splitTotal(state.dial.pan);
+      const tn = splitTotal(state.dial.tilt);
+      // 会聚：offset = atan(PD/2d)，PD=63mm；L=eye+off, R=eye-off
+      const d = parseFloat(($('#c2_d') || {}).value) || 0.8;
+      const off = Math.atan(0.063 / (2 * Math.max(0.2, d))) * 180 / Math.PI;
+      const okSent = send({cmd:'calib.command', joints:{
+            neck_yaw: pn.neck, neck_pitch: tn.neck, neck_roll: 0,
+            eye_yaw_L: pn.eye + off, eye_yaw_R: pn.eye - off,
+            eye_pitch_L: tn.eye, eye_pitch_R: tn.eye}});
+
+      const m = $('#c2_mode_hint');
+      if (m) m.textContent = `颈 ${pn.neck.toFixed(1)}° / 眼 ${pn.eye.toFixed(1)}° · 会聚±${off.toFixed(2)}°`;
+      log(okSent ? `→ 总 ${state.dial.pan.toFixed(1)}° → 颈 ${pn.neck.toFixed(1)} 眼 ${pn.eye.toFixed(1)}`
+                 : '✗ 未连接，命令没发出去');
+      drawGaze();
+    };
+
+    document.querySelectorAll('[data-adj]').forEach(b => b.onclick = () => {
+      const [dp, dt] = b.dataset.adj.split(',').map(Number);
+      setDial(state.dial.pan + dp, state.dial.tilt + dt);
+    });
+    document.querySelectorAll('[data-mode]').forEach(b => {
+      b.classList.toggle('primary', b.dataset.mode === state.mode);
+      b.onclick = () => {
+        state.mode = b.dataset.mode;
+        document.querySelectorAll('[data-mode]').forEach(x =>
+          x.classList.toggle('primary', x.dataset.mode === state.mode));
+        setDial(state.dial.pan, state.dial.tilt);   // 换模式立即重新下发
+      };
+    });
+    const paintGrid = () => {
+      document.querySelectorAll('[data-point]').forEach(c => {
+        const i = Number(c.dataset.point);
+        const cur = i === state.pointIdx;
+        const done = state.donePoints.has(GRID_POINTS[i].id + '_d' + state.c2DistStage);
+        c.style.background = cur ? '#2d6' : (done ? '#1f3a2a' : '#2a303a');
+        c.style.color = cur ? '#000' : '#c9cfd8';
+        c.style.borderColor = cur ? '#2d6' : '#2c323c';
+      });
+      const h = document.querySelector('#body h3, .card h3');
+      const totalPoints = 9;
+      const totalStages = 3;
+      if (h) h.textContent = `标定点（距离 ${state.c2DistStage + 1}/${totalStages} · 第 ${state.pointIdx + 1}/${totalPoints} 点：${GRID_POINTS[state.pointIdx].name}）`;
+    };
+    document.querySelectorAll('[data-point]').forEach(c => c.onclick = () => {
+      state.pointIdx = Number(c.dataset.point);
+      const q = GRID_POINTS[state.pointIdx];
+      paintGrid();
+      setDial(q.pan, q.tilt);
+    });
+    $('#c2_center').onclick = () => setDial(0,0);
+    $('#c2_pan').oninput = () => setDial(parseFloat($('#c2_pan').value)||0, state.dial.tilt);
+    $('#c2_tilt').oninput = () => setDial(state.dial.pan, parseFloat($('#c2_tilt').value)||0);
+    $('#c2_add').onclick = () => {
+      const q = GRID_POINTS[state.pointIdx] || {id:'cm', name:'正中'};
+      const pn = splitTotal(state.dial.pan);
+      const tn = splitTotal(state.dial.tilt);
+      const dVal = parseFloat($('#c2_d').value);
+      if (!isFinite(dVal) || dVal <= 0) { log('距离无效，请先填距离 d (m)'); return; }
+      const pc = parseFloat($('#c2_pc').value);
+      const tc = parseFloat($('#c2_tc').value);
+      if (!isFinite(pc) || !isFinite(tc)) { log('系统 pan_cam / tilt_cam 必须填数字'); return; }
+      addSample({
+        point: q.name + '_d' + state.c2DistStage, d: dVal,
+        pan_cam: pc, tilt_cam: tc,
+        pan_dial: state.dial.pan, tilt_dial: state.dial.tilt,
+        neck_yaw: pn.neck, eye_yaw: pn.eye, mode: state.mode});
+      state.donePoints.add(q.id + '_d' + state.c2DistStage);
+      state.c2Distances = state.c2Distances || new Set();
+      state.c2Distances.add(dVal.toFixed(1));
+      // 推进：9点完 → 下一个距离；3距离完 → 完成
+      state.pointIdx++;
+      if (state.pointIdx >= GRID_POINTS.length) {
+        state.pointIdx = 0;
+        state.c2DistStage++;
+      if (state.c2DistStage >= 3) {
+          log('✅ 3×9=27 点采集完成，可以拟合');
+          state.c2DistStage = 2;  // 停在最后
+          $('#c2_add').disabled = true;  // 完成后禁止继续采样
+        } else {
+          log(`→ 距离 ${state.c2DistStage + 1}/3：请输入新距离后继续`);
+        }
+      }
+      paintGrid();
+      const q2 = GRID_POINTS[state.pointIdx];
+      setDial(q2.pan, q2.tilt);
+      const nd = state.c2Distances.size;
+      $('#c2_count').textContent = `已采 ${state.donePoints.size}/27 点 · ${nd} 个距离`;
+    };
+    $('#c2_fit').onclick = () => send({cmd:'calib.fit', step:'c2'});
+    // 用已有状态同步（切步骤回来不丢角度）
+    $('#c2_pan').value = state.dial.pan.toFixed(1);
+    $('#c2_tilt').value = state.dial.tilt.toFixed(1);
+    paintGrid();
+    setDial(state.dial.pan, state.dial.tilt);
+  }
+  if (id === 'c4'){
+    $('#c4_add').onclick = () => {
+      const d = parseFloat($('#c4_d').value);
+      const px = parseFloat($('#c4_px').value);
+      if (!isFinite(d) || d <= 0) { log('C4: 距离 d 必须是正数'); return; }
+      if (!isFinite(px) || px <= 0) { log('C4: 眼距像素必须是正数'); return; }
+      addSample({d: d, eye_dist_px: px});
+    };
+    $('#c4_fit').onclick = () => send({cmd:'calib.fit', step:'c4'});
+  }
+  if (['c3','c5','c6','c7'].includes(id)){
+    $('#auto_run').onclick = () => {
+      $('#auto_run').disabled = true;
+      send({cmd:'calib.run', step:id});
+      log(`开始 ${id} …`);
+    };
+    if (id === 'c3' && $('#auto_quick')){
+      $('#auto_quick').onclick = () => {
+        $('#auto_quick').disabled = true;
+        send({cmd:'calib.run', step:'c3', quick:true});
+        log('开始 c3 快速复验 …');
+      };
+    }
+  }
+}
+
+function drawGaze(){
+  const c = $('#c2_canvas'); if (!c) return;
+  const g = c.getContext('2d'), W = c.width, H = c.height;
+  g.clearRect(0,0,W,H);
+  g.strokeStyle = '#2c323c'; g.beginPath();
+  g.moveTo(W/2,0); g.lineTo(W/2,H); g.moveTo(0,H/2); g.lineTo(W,H/2); g.stroke();
+  g.strokeStyle = '#2c323c';
+  [[-20,0],[20,0],[0,-15],[0,15]].forEach(([x,y]) => {
+    g.beginPath(); g.moveTo(W/2 + x*3-4, H/2 + y*3); g.lineTo(W/2 + x*3+4, H/2 + y*3); g.stroke();
+  });
+  const x = W/2 + state.dial.pan*3, y = H/2 + state.dial.tilt*3;   // tilt>0 = 向下
+  g.fillStyle = '#4c8dff'; g.beginPath(); g.arc(x,y,4,0,7); g.fill();
+  g.fillStyle = '#8b929e'; g.font = '10px monospace';
+  g.fillText(`pan ${state.dial.pan.toFixed(1)}°  tilt ${state.dial.tilt.toFixed(1)}°`, 6, 12);
+}
+
+/* ---------------- 结果展示 ---------------- */
+function renderResult(msg){
+  const v = $('#verdict');
+  v.className = 'verdict ' + msg.verdict;
+  v.textContent = {pass:'✅ 通过', warn:'⚠️ 可用但需注意', fail:'❌ 未通过'}[msg.verdict] || msg.verdict;
+  const tbl = $('#tbl'); if (!tbl) return;
+  const p = msg.payload || {};
+  if (msg.step === 'c1') {
+    const row = {'fx':p.fx, 'cx':p.cx, 'FOV':p.fov_h_deg+'°', 'RMS':p.rms_px+' px'};
+    if (p.fy != null && p.fy !== undefined) row['fy'] = p.fy;
+    if (p.cy != null && p.cy !== undefined) row['cy'] = p.cy;
+    if (p.rms_v_px != null) row['RMS_v'] = p.rms_v_px+' px';
+    if (p.warn) row['⚠️'] = p.warn;
+    tbl.innerHTML = kv(row);
+  }
+  else if (msg.step === 'c2') tbl.innerHTML = kv({'yaw0':p.yaw0_deg+'°','pitch0':p.pitch0_deg+'°',
+      'Δy':p.dy_m+' m','残差max':p.residual.max+'°'});
+  else if (msg.step === 'c4') tbl.innerHTML = kv({'K':p.K, '误差':JSON.stringify(p.err_pct)});
+  else if (msg.step === 'c3'){
+    const lim = p.limits || {};
+    tbl.innerHTML = `<table><tr><th>通道</th><th>负极限</th><th>正极限</th><th>不对称</th><th>R²</th></tr>${
+      Object.entries(lim).map(([k,v]) =>
+        `<tr><td>${k}</td><td class="mono">${v.neg}°</td><td class="mono">${v.pos}°</td>
+         <td class="mono">${v.asym_deg}°</td>
+         <td class="mono">${((p.channels || {})[k] || {}).r2 ?? '-'}</td></tr>`).join('')}</table>`;
+  }
+  else if (msg.step === 'c6') tbl.innerHTML = table(Object.entries(p.channels||p.joints||{}));
+  else if (msg.step === 'c5') tbl.innerHTML = kv({'IPC p99':p.ipc.rtt_ms.p99+' ms',
+      '看门狗':p.watchdog_max_age_ms+' ms','颈延迟':p.neck_delay_ms+' ms'});
+  else if (msg.step === 'c7'){
+    const chans = p.channels || {};
+    const d = p.derived || {};
+    if (!Object.keys(chans).length) tbl.innerHTML = '<span class="hint">没有通道数据</span>';
+    else tbl.innerHTML = table(Object.entries(chans)) +
+      kv({'死区': JSON.stringify(d.deadzone_deg ?? '-'),
+          '量化步长': JSON.stringify(d.cmd_quantum_deg ?? '-'),
+          '会聚上限': (d.vergence_max_distance_m ?? '-') + ' m'});
+  }
+}
+const kv = o => `<table>${Object.entries(o).map(([k,v])=>`<tr><th>${k}</th><td class="mono">${v}</td></tr>`).join('')}</table>`;
+const table = rows => `<table><tr><th>通道</th><th>明细</th></tr>${
+  rows.map(([k,v])=>`<tr><td>${k}</td><td class="mono">${JSON.stringify(v)}</td></tr>`).join('')}</table>`;
+
+function showActive(active){
+  const pre = document.createElement('pre');
+  pre.className = 'mono';
+  pre.style.cssText = 'position:fixed;inset:60px 20px 20px;background:#0e1015;border:1px solid #2c323c;'+
+    'border-radius:8px;padding:16px;overflow:auto;z-index:99;color:#e8eaed';
+  pre.textContent = JSON.stringify(active, null, 2);
+  const close = () => pre.remove();
+  pre.onclick = close;
+  document.body.appendChild(pre);
+}
+
+/* ---------------- 快捷键 ---------------- */
+addEventListener('keydown', e => {
+  const id = state.current;
+  // C2 摆位：方向键调姿态，但距离输入框内不接管（避免误触）
+  const ARROWS = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'];
+  const inInput = ['c2_d','c2_pc','c2_tc'].includes(e.target.id);
+  if (id === 'c2' && ARROWS.includes(e.code) && $('#c2_pan') && !inInput) {
+    e.preventDefault();
+    const d = e.shiftKey ? STEP_DEG * 5 : STEP_DEG;
+    const m = {ArrowLeft:[-d,0], ArrowRight:[d,0], ArrowUp:[0,-d], ArrowDown:[0,d]}[e.code];
+    const pan = THREE_clamp((parseFloat($('#c2_pan').value)||0) + m[0], -30, 30);
+    const tilt = THREE_clamp((parseFloat($('#c2_tilt').value)||0) + m[1], -30, 30);
+    $('#c2_pan').value = pan.toFixed(1); $('#c2_tilt').value = tilt.toFixed(1);
+    $('#c2_pan').dispatchEvent(new Event('input'));
+    return;
+  }
+  // 空格采集：即使光标在输入框里也生效（C1/C2/C4 流程是填数字→空格）
+  if (e.code === 'Space' && (id==='c1'||id==='c2'||id==='c4')) {
+    e.preventDefault(); $(`#${id}_add`).click(); return;
+  }
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Enter') { e.preventDefault();
+    const i = STEP_ORDER.indexOf(id); if (i >= 0 && i < 6) selectStep(STEP_ORDER[i+1]); }
+  if (e.code === 'Escape'){
+    send({cmd:'calib.abort'});
+    document.querySelectorAll('button:disabled').forEach(b => b.disabled = false);
+    log('已中止（已存的步骤保留）');
+  }
+});
+
+$('#btnStatus').onclick = () => send({cmd:'calib.status'});
+$('#build').textContent = BUILD;
+state.mode = state.mode || 'both';
+connect();
+</script>
+</body>
+</html>

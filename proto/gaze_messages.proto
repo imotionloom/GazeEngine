@@ -1,0 +1,220 @@
+syntax = "proto3";
+
+// 机器人眼球灵动性注视系统 · 消息契约 v2.1
+// 与《注视系统接口与部署设计 v1.0》§3 一一对应。
+// 跨进程流：IF-1a/1b/control/heartbeat 走 ZMQ IPC；IF-5/IF-6 走共享内存 ring buffer。
+
+package gaze;
+
+// ---------- 公共头 ----------
+message MsgHeader {
+  uint32 v       = 1;   // schema 版本
+  uint64 ts_ms   = 2;   // 发送时刻 wall-clock 毫秒
+  uint64 seq     = 3;   // 单调递增，丢帧检测
+}
+
+// ---------- IF-0：相机 → 感知 ----------
+// 图像帧走进程内零拷贝 buffer，不做 proto 序列化；此处仅留元信息。
+message CameraFrameMeta {
+  MsgHeader header  = 1;
+  uint32 camera_id  = 2;
+  uint32 width      = 3;
+  uint32 height     = 4;
+}
+
+// ---------- IF-1a：感知 → 下游（高频轻流） ----------
+enum ImageQuality {
+  GOOD = 0;
+  POOR = 1;
+}
+
+message AnchorPx {
+  int32 u = 1;
+  int32 v = 2;
+}
+
+message FaceAnchors {
+  AnchorPx eye_L  = 1;
+  AnchorPx eye_R  = 2;
+  AnchorPx nose   = 3;
+  AnchorPx mouth  = 4;
+}
+
+message DistanceEst {
+  double est_m      = 1;
+  double dot_mps    = 2;
+  double confidence = 3;
+}
+
+message PerceptionTrack {
+  uint32 track_id        = 1;
+  repeated int32 bbox_px = 2;   // [x, y, w, h]
+  FaceAnchors anchors    = 3;
+  double face_confidence = 4;
+  DistanceEst distance   = 5;
+  double speaking_prob   = 6;   // 嘴部开合度 → 说话概率 [0,1]
+  string identity        = 7;   // 身份标签（unknown/owner/guest）
+}
+
+message PerceptionTracks {
+  MsgHeader header        = 1;
+  ImageQuality image_quality = 2;
+  repeated PerceptionTrack tracks = 3;
+}
+
+// ---------- IF-1b：感知 → 下游（事件驱动 meta） ----------
+enum TrackEvent {
+  NEW_TRACK  = 0;
+  TRACK_LOST = 1;
+  UPDATE     = 2;
+}
+
+message Vec3Deg {
+  double yaw   = 1;
+  double pitch = 2;
+  double roll  = 3;
+}
+
+message TrackMeta {
+  MsgHeader header     = 1;
+  TrackEvent event     = 2;
+  uint32 track_id      = 3;
+  bytes embedding      = 4;   // 128 维 float32
+  Vec3Deg headpose_deg = 5;
+  double speaking_prob = 6;
+  string emotion       = 7;
+}
+
+// ---------- IF-2：意图 → 几何 ----------
+enum GazeState {
+  LOOKING_AT_PERSON = 0;
+  GAZE_AWAY         = 1;
+  RETURN            = 2;
+  SCANNING          = 3;
+}
+
+enum GazePoint {
+  EYE_MIDPOINT = 0;
+  NOSE         = 1;
+  MOUTH        = 2;
+  FRAME_CENTER = 3;
+  SCAN         = 4;
+  AWAY         = 5;
+  PRESET       = 6;
+}
+
+message EventOverride {
+  string type       = 1;
+  uint32 track_id   = 2;
+  uint32 hold_ms    = 3;
+}
+
+message ScanDirDeg {
+  double pan_deg  = 1;
+  double tilt_deg = 2;
+}
+
+message Intent {
+  MsgHeader header          = 1;
+  GazeState state           = 2;
+  uint32 active_track_id    = 3;
+  GazePoint gaze_point      = 4;
+  ScanDirDeg scan_dir       = 5;
+  EventOverride event_override = 6;
+  double looking_ratio      = 7;
+}
+
+// ---------- IF-3：几何 → 动力学 ----------
+message GazeTarget {
+  MsgHeader header    = 1;
+  double body_pan_deg = 2;
+  double body_tilt_deg = 3;
+  double offset_deg   = 4;
+  double distance_m   = 5;
+  GazePoint source   = 6;
+  double confidence   = 7;
+}
+
+// ---------- IF-4：动力学 → 仲裁 ----------
+enum JointSource {
+  RULE = 0;
+  RGT  = 1;
+}
+
+message JointAngles {
+  double neck_yaw  = 1;
+  double neck_pitch = 2;
+  double neck_roll = 3;
+  double eye_yaw_L = 4;
+  double eye_yaw_R = 5;
+  double eye_pitch_L = 6;
+  double eye_pitch_R = 7;
+  double lid_up_L  = 8;
+  double lid_up_R  = 9;
+  double lid_low_L = 10;
+  double lid_low_R = 11;
+}
+
+message JointTargetRaw {
+  MsgHeader header   = 1;
+  JointSource source = 2;
+  JointAngles joints = 3;
+  bool blink_trigger = 4;
+  double confidence = 5;
+}
+
+// ---------- IF-5：仲裁 → 执行 ----------
+message JointCmd {
+  MsgHeader header    = 1;
+  JointAngles joints  = 2;
+  double vel_limit_dps = 3;
+}
+
+// ---------- IF-6：执行 → 全链 ----------
+message FaultFlags {
+  bool overtemp = 1;
+  bool stall    = 2;
+}
+
+message JointState {
+  MsgHeader header    = 1;
+  JointAngles joints_actual = 2;
+  FaultFlags fault    = 3;
+}
+
+// ---------- /system/control ----------
+enum ControlMode {
+  MODE_AUTO = 0;
+  DEMO      = 1;
+  FREEZE    = 2;
+}
+
+enum ActuatorBackend {
+  SERVO       = 0;
+  DIGITAL_HUMAN = 1;
+  SIM         = 2;
+}
+
+message PresetAnchorDeg {
+  double pan_deg  = 1;
+  double tilt_deg = 2;
+}
+
+message SystemControl {
+  MsgHeader header        = 1;
+  ControlMode mode        = 2;
+  double speed_scale      = 3;
+  string event_inject     = 4;
+  ActuatorBackend actuator_backend = 5;
+  string preset           = 6;   // auto | meditate | attentive | greeting | drowsy | curious | idle
+  PresetAnchorDeg preset_anchor = 7;
+  uint32 preset_hold_ms   = 8;
+  bool recalibrate        = 9;
+}
+
+// ---------- /heartbeat ----------
+message Heartbeat {
+  MsgHeader header = 1;
+  string module    = 2;
+  bool alive       = 3;
+}

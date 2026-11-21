@@ -1,0 +1,34 @@
+NOTICE
+======
+
+Copyright (c) 2026 imotionloom. All rights reserved except as granted by the LICENSE file.
+
+"imotionloom" is a pseudonym of the author of this project. It is the copyright holder
+recorded in LICENSE on purpose: the author prefers not to publish a legal name alongside
+the code. This does not weaken or widen the MIT grant in LICENSE — the code is licensed
+exactly as LICENSE says, and nothing in this NOTICE adds a condition to it.
+
+Identity of the copyright holder can be established, and will be disclosed, to the
+following parties on request and without publication:
+
+  - a hosting platform's abuse / DMCA process, when filing a takedown or a counter-notice;
+  - a court, arbitrator or regulator, in the course of a dispute;
+  - legal counsel acting for the copyright holder, including an agent filing on their behalf.
+
+In practice that means an infringement claim is filed under the author's legal identity
+while the repository keeps showing the pseudonym. Evidence of authorship — commit history,
+file timestamps, publication records — is retained for that purpose.
+
+If you need to contact the maintainer about licensing, commercial use or a permissions
+request, open an issue or use the security advisory channel described in SECURITY.md;
+either route reaches the author.
+
+Third-party material is not covered by this notice. Model weights, avatar models and test
+footage are not distributed with this repository at all (see docs/ASSETS.md), and the
+vendored three.js / three-vrm builds keep their own upstream licenses (see
+3d/vendor/README.md).
+
+---
+说明：`imotionloom` 是作者笔名，作为版权人记录在 LICENSE 中；作者真实身份不随代码公开，
+但在平台投诉、司法程序或受托律师要求时可披露并据以主张权利。本文件不改变、不增加
+LICENSE 里 MIT 条款的任何条件。
